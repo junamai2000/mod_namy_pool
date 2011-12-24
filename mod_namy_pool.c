@@ -103,6 +103,12 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   tmp->info->in_use = 1;
   tmp->info->num_of_used++;
 
+  // pingのコストが大きいならタイマーとか最終使用日時とかで回数を減らす
+  //if (mysql_ping(tmp->mysql) != 0)
+  //{
+  //  TRACE("[mod_namy_pool] %s: connection ping failed, id:%d", connection_pool_name, tmp->id);
+  //}
+
   return tmp->mysql;	
 
 }
@@ -422,6 +428,23 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
           svr->server, svr->user,
           svr->pw, svr->db, svr->port,
           svr->socket, svr->option);
+      if (mysql==NULL)
+      {
+        TRACES("[mod_namy_pool] %s: connection to %s failed", con_name, svr->server);
+        return !OK;
+      }
+      //------------------------------------------------
+      // Note: mysql_real_connect() incorrectly reset 
+      // the MYSQL_OPT_RECONNECT option to its default value 
+      // before MySQL 5.1.6. Therefore, prior to that version, 
+      // if you want reconnect to be enabled for each connection, 
+      // you must call mysql_options() with the MYSQL_OPT_RECONNECT 
+      // option after each call to mysql_real_connect(). 
+      // This is not necessary as of 5.1.6: Call mysql_options() 
+      // only before mysql_real_connect() as usual. 
+      //-------------------------------------------------
+      my_bool my_true = TRUE;
+      mysql_options(mysql, MYSQL_OPT_RECONNECT, &my_true);
       con->mysql = mysql;
 
       // 共有スペースのアドレスを先に進める
@@ -470,9 +493,14 @@ static int namy_pool_info_handler(request_rec *r)
     namy_svr_cfg *svr = (namy_svr_cfg*)val;
     char *con_name = (char*)key;
 
-    ap_rprintf(r, "<br /><b>Connection Identity: <b>%s<br />", con_name);
+    ap_rprintf(r, "<br /><b>Connection Pool Identity: <b>%s<br />", con_name);
+    ap_rprintf(r, "<b>Server Name: </b>%s<br />", svr->server);
+    ap_rprintf(r, "<b>Server Port: </b>%d<br />", svr->port);
+    ap_rprintf(r, "<b>Server User: </b>%s<br />", svr->user);
+    ap_rprintf(r, "<b>Server Database: </b>%s<br />", svr->db);
     ap_rprintf(r, "<b>Server SHM: </b>%d<br />", svr->shm);
     ap_rprintf(r, "<b>Connection SEM: </b>%d<br />", svr->sem);
+
 
     namy_connection *tmp = NULL;
     ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
