@@ -23,8 +23,10 @@
 
 extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
-MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
+// API
+MYSQL *namy_attach_pool_connection(server_rec *s)
 {
+	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
 	namy_connection *con = NULL;
 	namy_connection *tmp = NULL;
 	for (tmp = svr->next; tmp!=NULL; )
@@ -66,8 +68,9 @@ MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 
 }
 
-int namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql)
+int namy_detach_pool_connection(server_rec *s, MYSQL *mysql)
 {
+	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
 	// 空きコネクション取得
 	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
@@ -99,8 +102,9 @@ int namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql)
 	return NAMY_OK;
 }
 
-void namy_close_pool_connection(namy_svr_cfg *svr)
+void namy_close_pool_connection(server_rec *s)
 {
+	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
 	namy_connection *tmp;
 	shmctl(svr->shm, IPC_RMID, NULL);
 	for (tmp = svr->next; tmp!=NULL; )
@@ -112,8 +116,9 @@ void namy_close_pool_connection(namy_svr_cfg *svr)
 	}
 }
 
-int namy_is_pooled_connection(namy_svr_cfg *svr, MYSQL *mysql)
+int namy_is_pooled_connection(server_rec *s, MYSQL *mysql)
 {
+	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
 	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
 	for (tmp = svr->next; tmp!=NULL; )
@@ -181,8 +186,7 @@ static const char *namy_param(cmd_parms *cmd, void *dconf, const char *val)
 static apr_status_t namy_pool_destroy(void *data)
 {
 	server_rec *s = data;
-	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
-	namy_close_pool_connection(svr);
+	namy_close_pool_connection(s);
 	return APR_SUCCESS;
 }
 

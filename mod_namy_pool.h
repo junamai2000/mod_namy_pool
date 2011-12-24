@@ -48,10 +48,8 @@ typedef struct {
 // ユーティリティー
 #define NAMY_UNKNOWN_CONNECTION 0
 #define NAMY_OK 1
-MYSQL* namy_attach_pool_connection(namy_svr_cfg *svr);
-int    namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql);
-void   namy_close_pool_connection(namy_svr_cfg *svr);
-int    namy_is_pooled_connection(namy_svr_cfg *svr, MYSQL *mysql);
-
-extern module AP_MODULE_DECLARE_DATA namy_pool_module;
+MYSQL* namy_attach_pool_connection(server_rec *s);
+int    namy_detach_pool_connection(server_rec *s, MYSQL *mysql);
+void   namy_close_pool_connection(server_rec *s);
+int    namy_is_pooled_connection(server_rec *s, MYSQL *mysql);
 #endif
