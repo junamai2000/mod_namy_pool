@@ -78,6 +78,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   }
 
   // 全部使用中なので最初のコネクションを待機
+  struct sembuf sembuffer;  
   if (tmp == NULL)
   {
     // ランダムで待機コネクションを選択
@@ -90,11 +91,21 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
         break;
       }
     }
-    TRACE("[mod_namy_pool] %s: connection is too busy, wait = id:%d ramdom:%d", connection_pool_name, tmp->id, wait);
+    // 統計情報作成
+    sembuffer.sem_num = svr->connections+1;  
+    sembuffer.sem_op = -1;  
+    sembuffer.sem_flg = SEM_UNDO;  
+    semop(svr->sem, &sembuffer, 1);  
+    
+    svr->stat->num_of_conflicted++; // コネクション待ち発生
+    
+    sembuffer.sem_op = 1;  
+    sembuffer.sem_flg = SEM_UNDO;
+    semop(svr->sem, &sembuffer, 1);
+    DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d ramdom:%d", connection_pool_name, tmp->id, wait);
   }
 
   //　コネクションロック
-  struct sembuf sembuffer;  
   sembuffer.sem_num = tmp->id;  
   sembuffer.sem_op = -1;  
   sembuffer.sem_flg = SEM_UNDO;  
@@ -156,7 +167,7 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     tmp->info->in_use = 0;
     DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
 
-    sembuffer.sem_num = tmp->id;  
+    sembuffer.sem_num = tmp->id;
     sembuffer.sem_op = 1;  
     sembuffer.sem_flg = SEM_UNDO;  
     semop(svr->sem, &sembuffer, 1);
@@ -383,7 +394,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     int segment;
     // info構造体 共有スペース確保
     // 使われた回数と利用中フラグを格納
-    segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->connections, S_IRUSR|S_IWUSR);  
+    segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->connections + sizeof(namy_stat), S_IRUSR|S_IWUSR);  
     if (segment == -1)
     {
       TRACES("[mod_namy_pool] %s: namy_cinfo shmget error", con_name);
@@ -395,7 +406,8 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     svr->shm = segment;
 
     // セマフォ コネクション用排他処理
-    segment = semget(IPC_PRIVATE, svr->connections, S_IRUSR|S_IWUSR);
+    // 統計情報用も含めて+1
+    segment = semget(IPC_PRIVATE, svr->connections + 1, S_IRUSR|S_IWUSR);
     if (segment == -1)  
     {
       TRACES("[mod_namy_pool] %s: semaphore semget error", con_name);
@@ -457,6 +469,15 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       svr->next = con;
       con->next = tmp;
     }
+    // 統計情報のアドレス
+    svr->stat = (namy_stat*)info;
+    svr->stat->num_of_conflicted = 0;
+    // 統計情報のセマフォ初期化 セマフォ番号は０から始まるから+1しない
+    if (semctl(svr->sem, svr->connections, SETVAL, 1) != 0)
+    {
+      TRACES("[mod_namy_pool] %s: stat semaphore segment error", con_name);
+      return !OK;
+    }
     TRACES("[mod_namy_pool] %s: connected to %s with %d conections", con_name, svr->server, svr->connections);
   }
 
@@ -500,7 +521,7 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Server Database: </b>%s<br />", svr->db);
     ap_rprintf(r, "<b>Server SHM: </b>%d<br />", svr->shm);
     ap_rprintf(r, "<b>Connection SEM: </b>%d<br />", svr->sem);
-
+    ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->num_of_conflicted);
 
     namy_connection *tmp = NULL;
     ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 

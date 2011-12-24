@@ -10,8 +10,13 @@
 // 書き込みが発生するので、shmに入れる
 typedef struct {
   int in_use; // 使用中なら1, それ以外は0
-  int num_of_used; // 使われた回数
+  unsigned long num_of_used; // 使われた回数
 } namy_cinfo;
+
+// 統計情報
+typedef struct {
+  unsigned long  num_of_conflicted;
+} namy_stat;
 
 // コネクション保存構造体
 typedef struct _namy_connection {
@@ -33,6 +38,7 @@ typedef struct {
   int connections;
   int shm;
   int sem;
+  namy_stat *stat;
   namy_connection* next; // 全コネクションにアクセス
 } namy_svr_cfg;
 
