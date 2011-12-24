@@ -23,18 +23,13 @@ typedef struct {
 } namy_cinfo;
 
 // コネクション保存構造体
-typedef struct {
+typedef struct _namy_connection {
 	int id;
 	int shm; // shm番号 セマフォに利用
 	MYSQL *mysql; // コネクション
 	namy_cinfo *info; // コネクション状態
+	struct _namy_connection *next; // リンクリスト
 } namy_connection;
-
-// コネクションのリンクリスト
-typedef struct _namy_connection_list{
-	namy_connection *instance;
-	struct _namy_connection_list *next;
-} namy_connection_list;
 
 // サーバーセッティング
 typedef struct {
@@ -45,9 +40,9 @@ typedef struct {
 	const char *socket;
 	int port;
 	int option;
-	int connections;
+	int num_of_connections;
 	int shm;
-	namy_connection_list* next; // 全コネクションにアクセス
+	namy_connection* connections; // 全コネクションにアクセス
 } namy_svr_cfg;
 
 // ユーティリティー

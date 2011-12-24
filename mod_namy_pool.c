@@ -25,13 +25,13 @@ extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
 MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 {
-	namy_connection_list *tmp;
 	namy_connection *con = NULL;
-	for (tmp = svr->next; tmp!=NULL; )
+	namy_connection *tmp = NULL;
+	for (tmp = svr->connections; tmp!=NULL; )
 	{
-		if (tmp->instance->info->in_use == 0)
+		if (tmp->info->in_use == 0)
 		{
-			con = tmp->instance;
+			con = tmp;
 			//fprintf(fp, "namy_pool: attach con->id = %d\n", con->id);
 			break;
 		}
@@ -42,11 +42,11 @@ MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 	if (con == NULL)
 	{
 		// ランダムで待機コネクションを洗濯
-		int wait = rand()%svr->connections;
+		int wait = rand()%svr->num_of_connections;
 		int i=0;
-		for (tmp = svr->next; i<=wait||tmp!=NULL; i++)
+		for (tmp = svr->connections; i<=wait||tmp!=NULL; i++)
 		{
-			con = svr->next->instance;
+			con = tmp;
 			tmp = tmp->next;
 		}
 		fprintf(stderr, "namy_pool connection busy wait = id:%d ramdom:%d\n", con->id, wait);
@@ -69,13 +69,13 @@ MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 int namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql)
 {
 	// 空きコネクション取得
-	namy_connection_list *tmp = NULL;
+	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
-	for (tmp = svr->next; tmp!=NULL; )
+	for (tmp = svr->connections; tmp!=NULL; )
 	{
-		if(strncmp(tmp->instance->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
+		if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
 		{
-			con = tmp->instance;
+			con = tmp;
 			break;
 		}
 		tmp = tmp->next;
@@ -101,28 +101,26 @@ int namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql)
 
 void namy_close_pool_connection(namy_svr_cfg *svr)
 {
-	namy_connection_list *tmp;
+	namy_connection *tmp;
 	shmctl(svr->shm, IPC_RMID, NULL);
-
-	for (tmp = svr->next; tmp!=NULL; )
+	for (tmp = svr->connections; tmp!=NULL; )
 	{
-		namy_connection *p = tmp->instance;
-		semctl(p->shm, 0, IPC_RMID);
-		fprintf(stderr, "namy_pool closed = id:%d scramble: %s\n", p->id, p->mysql->scramble);
-		mysql_close(p->mysql);
+		semctl(tmp->shm, 0, IPC_RMID);
+		fprintf(stderr, "namy_pool closed = id:%d scramble: %s\n", tmp->id, tmp->mysql->scramble);
+		mysql_close(tmp->mysql);
 		tmp = tmp->next;
 	}
 }
 
 int namy_is_pooled_connection(namy_svr_cfg *svr, MYSQL *mysql)
 {
-	namy_connection_list *tmp = NULL;
+	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
-	for (tmp = svr->next; tmp!=NULL; )
+	for (tmp = svr->connections; tmp!=NULL; )
 	{
-		if(strncmp(tmp->instance->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
+		if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
 		{
-			con = tmp->instance;
+			con = tmp;
 			return NAMY_OK;
 		}
 		tmp = tmp->next;
@@ -174,7 +172,7 @@ static const char *namy_param(cmd_parms *cmd, void *dconf, const char *val)
         break;
     case cmd_cons:
         ISINT(val);
-		svr->connections = atoi(val);
+		svr->num_of_connections = atoi(val);
         break;
     }
     return NULL;
@@ -198,9 +196,9 @@ static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
 	svr->pw = NULL;
 	svr->socket = NULL;
 	svr->option = 0;
-	svr->connections = 1;
+	svr->num_of_connections = 1;
 	svr->port = 0;
-	svr->next = NULL;
+	svr->connections = NULL;
     return svr;
 }
 
@@ -209,18 +207,20 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 {
 	int segment;
 	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
-	segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->connections, S_IRUSR|S_IWUSR);  
+	segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->num_of_connections, S_IRUSR|S_IWUSR);  
 	if (segment == -1)
 	{
 		fprintf(stderr, "shmget error\n");
 		exit(1);
 	}
+
+	// 全プロセスで使う共有スペース
 	namy_cinfo* alloc_info;
 	// info構造体shmに作る
 	alloc_info = (namy_cinfo*)shmat(segment, NULL, 0);
 	svr->shm = segment;
 	// コネクション用排他処理
-	segment = semget(IPC_PRIVATE, svr->connections, S_IRUSR|S_IWUSR);
+	segment = semget(IPC_PRIVATE, svr->num_of_connections, S_IRUSR|S_IWUSR);
 	if (segment == -1)  
 	{
 		fprintf(stderr, "semget error--\n");
@@ -228,7 +228,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 	}
 
 	int i;
-	for (i=0; i<svr->connections; i++)
+	for (i=0; i<svr->num_of_connections; i++)
 	{
 		namy_connection *con;
 		int n=0;
@@ -244,8 +244,8 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 		con->info = alloc_info;
 		con->info->in_use=0;
 		con->info->num_of_used=0;
-		alloc_info++;
-
+		con->next = NULL;
+		// mysql connect
 		MYSQL* mysql;
 		mysql = mysql_init(NULL);
 		mysql_real_connect(mysql,
@@ -253,23 +253,21 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 				svr->pw, svr->db, svr->port,
 				svr->socket, svr->option);
 		con->mysql = mysql;
-		fprintf(stderr, "namy_pool connected = id:%d scramble:%s\n", con->id, con->mysql->scramble);
 		
-		namy_connection_list *list = (namy_connection_list *)apr_palloc(pconf, sizeof(namy_connection_list));
-		list->instance = con;
-		list->next = NULL;
+		// 共有スペースのアドレスを先に進める
+		alloc_info++;
 
-		if(svr->next==NULL)
+		fprintf(stderr, "namy_pool connected = id:%d scramble:%s\n", con->id, con->mysql->scramble);
+
+		if(svr->connections==NULL)
 		{
-			svr->next = list;
+			svr->connections = con;
 		}
 		else
 		{
-			// コネクションリストに登録
-			namy_connection_list* tmp;
-			tmp = svr->next;
-			svr->next = list;
-			list->next = tmp;
+			namy_connection* tmp = svr->connections;
+			svr->connections = con;
+			con->next = tmp;
 		}
 	}
 	srand((unsigned) time(NULL));
@@ -291,16 +289,16 @@ static int namy_pool_info_handler(request_rec *r)
 	ap_rputs("<br />\n", r); 
 
 	namy_svr_cfg *svr = ap_get_module_config(r->server->module_config, &namy_pool_module);
-	namy_connection_list *tmp = NULL;
+	namy_connection *tmp = NULL;
 	ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>shm number</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
-	for (tmp = svr->next; tmp!=NULL; )
+	for (tmp = svr->connections; tmp!=NULL; )
 	{
 		ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>\n",
-				tmp->instance->id,
-				ap_escape_html(r->pool, tmp->instance->mysql->scramble),
-				tmp->instance->shm,
-				tmp->instance->info->num_of_used,
-				tmp->instance->info->in_use
+				tmp->id,
+				ap_escape_html(r->pool, tmp->mysql->scramble),
+				tmp->shm,
+				tmp->info->num_of_used,
+				tmp->info->in_use
 				);
 		tmp = tmp->next;
 	}
