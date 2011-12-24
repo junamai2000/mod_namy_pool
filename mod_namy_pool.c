@@ -29,43 +29,43 @@ extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 MYSQL *namy_attach_pool_connection(server_rec *s)
 {
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
-  namy_connection *con = NULL;
   namy_connection *tmp = NULL;
   for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if (tmp->info->in_use == 0)
     {
-      con = tmp;
-      //fprintf(fp, "namy_pool: attach con->id = %d\n", con->id);
+      //TRACE("[mod_namy_pool] connection is attached, id:%d", tmp->id,);
       break;
     }
   }
 
   // 全部使用中なので最初のコネクションを待機
-  if (con == NULL)
+  if (tmp == NULL)
   {
-    // ランダムで待機コネクションを洗濯
+    // ランダムで待機コネクションを選択
     int wait = rand()%svr->connections;
-    int i=0;
-    for (tmp = svr->next; i<=wait||tmp!=NULL; i++)
+    for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
     {
-      con = tmp;
-      tmp = tmp->next;
+      // ランダムで指定されたコネクションを取得
+      if (tmp->id  == wait)
+      {
+        break;
+      }
     }
-    TRACE("[mod_namy_pool] connection is busy, wait = id:%d ramdom:%d", con->id, wait);
+    TRACE("[mod_namy_pool] connection is too busy, wait = id:%d ramdom:%d", tmp->id, wait);
   }
 
   //　コネクションロック
   struct sembuf sembuffer;  
-  sembuffer.sem_num = con->id;  
+  sembuffer.sem_num = tmp->id;  
   sembuffer.sem_op = -1;  
   sembuffer.sem_flg = SEM_UNDO;  
-  semop(con->shm, &sembuffer, 1);  
+  semop(tmp->shm, &sembuffer, 1);  
   // 使用中にする
-  con->info->in_use = 1;
-  con->info->num_of_used++;
+  tmp->info->in_use = 1;
+  tmp->info->num_of_used++;
 
-  return con->mysql;	
+  return tmp->mysql;	
 
 }
 
@@ -74,31 +74,29 @@ int namy_detach_pool_connection(server_rec *s, MYSQL *mysql)
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
   // 空きコネクション取得
   namy_connection *tmp = NULL;
-  namy_connection *con = NULL;
   for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
     {
-      con = tmp;
       break;
     }
   }
 
   // unknown connection
-  if (con == NULL)
+  if (tmp == NULL)
   {
     return NAMY_UNKNOWN_CONNECTION;
   }
 
   // 解放
   struct sembuf sembuffer;  
-  con->info->in_use = 0;
-  //fprintf(fp, "namy_pool: detached con->id = %d\n", con->id);
+  tmp->info->in_use = 0;
+  //TRACE("[mod_namy_pool] connection is detached, id:%d", tmp->id);
 
-  sembuffer.sem_num = con->id;  
+  sembuffer.sem_num = tmp->id;  
   sembuffer.sem_op = 1;  
   sembuffer.sem_flg = SEM_UNDO;  
-  semop(con->shm, &sembuffer, 1);
+  semop(tmp->shm, &sembuffer, 1);
   return NAMY_OK;
 }
 
@@ -119,12 +117,10 @@ int namy_is_pooled_connection(server_rec *s, MYSQL *mysql)
 {
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
   namy_connection *tmp = NULL;
-  namy_connection *con = NULL;
   for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
     {
-      con = tmp;
       return NAMY_OK;
     }
   }
