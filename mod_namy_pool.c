@@ -1,4 +1,3 @@
-#include <sys/shm.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
@@ -20,6 +19,8 @@
 #include "apr_want.h"
 
 #include "mod_namy_pool.h"
+
+#define TRACE(...) ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s, __VA_ARGS__)
 
 extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
@@ -51,7 +52,7 @@ MYSQL *namy_attach_pool_connection(server_rec *s)
 			con = tmp;
 			tmp = tmp->next;
 		}
-		fprintf(stderr, "namy_pool connection busy wait = id:%d ramdom:%d\n", con->id, wait);
+		TRACE("[mod_namy_pool] connection is busy, wait = id:%d ramdom:%d", con->id, wait);
 	}
 
 	//　コネクションロック
@@ -110,7 +111,7 @@ void namy_close_pool_connection(server_rec *s)
 	for (tmp = svr->next; tmp!=NULL; )
 	{
 		semctl(tmp->shm, 0, IPC_RMID);
-		fprintf(stderr, "namy_pool closed = id:%d scramble: %s\n", tmp->id, tmp->mysql->scramble);
+		TRACE("[mod_namy_pool] connection is closed, id:%d scramble:%s", tmp->id, tmp->mysql->scramble);
 		mysql_close(tmp->mysql);
 		tmp = tmp->next;
 	}
@@ -193,7 +194,6 @@ static apr_status_t namy_pool_destroy(void *data)
 static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
 {
     namy_svr_cfg *svr = apr_pcalloc(pool, sizeof(namy_svr_cfg));
-
 	svr->server = NULL;
 	svr->user = NULL;
 	svr->db = NULL;
@@ -211,24 +211,26 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 {
 	int segment;
 	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
+	
+	// info構造体 共有スペース確保
+	// 使われた回数と利用中フラグを格納
 	segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->connections, S_IRUSR|S_IWUSR);  
 	if (segment == -1)
 	{
-		fprintf(stderr, "shmget error\n");
-		exit(1);
+		TRACE("[mod_namy_pool] namy_cinfo shmget error");
+		return !OK;
 	}
-
-	// 全プロセスで使う共有スペース
-	namy_cinfo* alloc_info;
-	// info構造体shmに作る
-	alloc_info = (namy_cinfo*)shmat(segment, NULL, 0);
+	// 全プロセスで使う共有スペースのポインタ
+	namy_cinfo* info;
+	info = (namy_cinfo*)shmat(segment, NULL, 0);
 	svr->shm = segment;
-	// コネクション用排他処理
+
+	// セマフォ コネクション用排他処理
 	segment = semget(IPC_PRIVATE, svr->connections, S_IRUSR|S_IWUSR);
 	if (segment == -1)  
 	{
-		fprintf(stderr, "semget error--\n");
-		exit(1);
+		TRACE("[mod_namy_pool] semaphore semget error");
+		return !OK;
 	}
 
 	int i;
@@ -236,16 +238,17 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 	{
 		namy_connection *con;
 		int n=0;
-		if ((n=semctl(segment, i, SETVAL, 1)) != 0)  
+		if ((n=semctl(segment, i, SETVAL, 1)) != 0)
 		{
-			fprintf(stderr, "semget error: %d: %s\n", segment,strerror(n));
-			exit(0);
+			TRACE("[mod_namy_pool] semaphore segment error");
+			return !OK;
 		}
 
+		// 構造体作成
 		con = (namy_connection*)apr_palloc(pconf, sizeof(namy_connection));
 		con->id = i;
 		con->shm = segment;
-		con->info = alloc_info;
+		con->info = info;
 		con->info->in_use=0;
 		con->info->num_of_used=0;
 		con->next = NULL;
@@ -259,22 +262,17 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 		con->mysql = mysql;
 		
 		// 共有スペースのアドレスを先に進める
-		alloc_info++;
+		info++;
+		TRACE("[mod_namy_pool] connected = id:%d scramble:%s", con->id, con->mysql->scramble);
 
-		fprintf(stderr, "namy_pool connected = id:%d scramble:%s\n", con->id, con->mysql->scramble);
-
-		if(svr->next ==NULL)
-		{
-			svr->next = con;
-		}
-		else
-		{
-			namy_connection* tmp = svr->next;
-			svr->next = con;
-			con->next = tmp;
-		}
+		// コネクションのリンクリスト
+		namy_connection* tmp = svr->next;
+		svr->next = con;
+		con->next = tmp;
 	}
+	// コネクション待ちする時のため	
 	srand((unsigned) time(NULL));
+	// メモリ解放と、コネクション解放
 	apr_pool_cleanup_register(pconf, s, namy_pool_destroy, apr_pool_cleanup_null);
     return OK;
 }
@@ -286,7 +284,6 @@ static int namy_pool_info_handler(request_rec *r)
 	}   
 	r->content_type = "text/html";    
 
-	//if (!r->header_only)
 	ap_rputs("<html><body>\n", r); 
 
 	ap_rputs(namy_pool_module.name, r); 
