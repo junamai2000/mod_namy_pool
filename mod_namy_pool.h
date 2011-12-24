@@ -1,3 +1,4 @@
+/* vim: set expandtab tabstop=2 shiftwidth=2 softtabstop=2 filetype=c: */
 #ifndef _mod_namy_pool_h
 #define _mod_namy_pool_h 
 
@@ -18,31 +19,31 @@
 // コネクションの状態
 // 書き込みが発生するので、shmに入れる
 typedef struct {
-	int in_use; // 使用中なら1, それ以外は0
-	int num_of_used; // 使われた回数
+  int in_use; // 使用中なら1, それ以外は0
+  int num_of_used; // 使われた回数
 } namy_cinfo;
 
 // コネクション保存構造体
 typedef struct _namy_connection {
-	int id;
-	int shm; // shm番号 セマフォに利用
-	MYSQL *mysql; // コネクション
-	namy_cinfo *info; // コネクション状態
-	struct _namy_connection *next; // リンクリスト
+  int id;
+  int shm; // shm番号 セマフォに利用
+  MYSQL *mysql; // コネクション
+  namy_cinfo *info; // コネクション状態
+  struct _namy_connection *next; // リンクリスト
 } namy_connection;
 
 // サーバーセッティング
 typedef struct {
-	const char *server;
-	const char *user;
-	const char *pw;
-	const char *db;
-	const char *socket;
-	int port;
-	int option;
-	int connections;
-	int shm;
-	namy_connection* next; // 全コネクションにアクセス
+  const char *server;
+  const char *user;
+  const char *pw;
+  const char *db;
+  const char *socket;
+  int port;
+  int option;
+  int connections;
+  int shm;
+  namy_connection* next; // 全コネクションにアクセス
 } namy_svr_cfg;
 
 // ユーティリティー
