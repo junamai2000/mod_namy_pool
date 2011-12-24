@@ -40,9 +40,9 @@ typedef struct {
 	const char *socket;
 	int port;
 	int option;
-	int num_of_connections;
+	int connections;
 	int shm;
-	namy_connection* connections; // 全コネクションにアクセス
+	namy_connection* next; // 全コネクションにアクセス
 } namy_svr_cfg;
 
 // ユーティリティー

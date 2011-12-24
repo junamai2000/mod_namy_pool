@@ -27,7 +27,7 @@ MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 {
 	namy_connection *con = NULL;
 	namy_connection *tmp = NULL;
-	for (tmp = svr->connections; tmp!=NULL; )
+	for (tmp = svr->next; tmp!=NULL; )
 	{
 		if (tmp->info->in_use == 0)
 		{
@@ -42,9 +42,9 @@ MYSQL *namy_attach_pool_connection(namy_svr_cfg *svr)
 	if (con == NULL)
 	{
 		// ランダムで待機コネクションを洗濯
-		int wait = rand()%svr->num_of_connections;
+		int wait = rand()%svr->connections;
 		int i=0;
-		for (tmp = svr->connections; i<=wait||tmp!=NULL; i++)
+		for (tmp = svr->next; i<=wait||tmp!=NULL; i++)
 		{
 			con = tmp;
 			tmp = tmp->next;
@@ -71,7 +71,7 @@ int namy_detach_pool_connection(namy_svr_cfg *svr, MYSQL *mysql)
 	// 空きコネクション取得
 	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
-	for (tmp = svr->connections; tmp!=NULL; )
+	for (tmp = svr->next; tmp!=NULL; )
 	{
 		if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
 		{
@@ -103,7 +103,7 @@ void namy_close_pool_connection(namy_svr_cfg *svr)
 {
 	namy_connection *tmp;
 	shmctl(svr->shm, IPC_RMID, NULL);
-	for (tmp = svr->connections; tmp!=NULL; )
+	for (tmp = svr->next; tmp!=NULL; )
 	{
 		semctl(tmp->shm, 0, IPC_RMID);
 		fprintf(stderr, "namy_pool closed = id:%d scramble: %s\n", tmp->id, tmp->mysql->scramble);
@@ -116,7 +116,7 @@ int namy_is_pooled_connection(namy_svr_cfg *svr, MYSQL *mysql)
 {
 	namy_connection *tmp = NULL;
 	namy_connection *con = NULL;
-	for (tmp = svr->connections; tmp!=NULL; )
+	for (tmp = svr->next; tmp!=NULL; )
 	{
 		if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
 		{
@@ -172,7 +172,7 @@ static const char *namy_param(cmd_parms *cmd, void *dconf, const char *val)
         break;
     case cmd_cons:
         ISINT(val);
-		svr->num_of_connections = atoi(val);
+		svr->connections = atoi(val);
         break;
     }
     return NULL;
@@ -196,9 +196,9 @@ static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
 	svr->pw = NULL;
 	svr->socket = NULL;
 	svr->option = 0;
-	svr->num_of_connections = 1;
+	svr->connections = 1;
 	svr->port = 0;
-	svr->connections = NULL;
+	svr->next = NULL;
     return svr;
 }
 
@@ -207,7 +207,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 {
 	int segment;
 	namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
-	segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->num_of_connections, S_IRUSR|S_IWUSR);  
+	segment = shmget(IPC_PRIVATE, sizeof(namy_cinfo)*svr->connections, S_IRUSR|S_IWUSR);  
 	if (segment == -1)
 	{
 		fprintf(stderr, "shmget error\n");
@@ -220,7 +220,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 	alloc_info = (namy_cinfo*)shmat(segment, NULL, 0);
 	svr->shm = segment;
 	// コネクション用排他処理
-	segment = semget(IPC_PRIVATE, svr->num_of_connections, S_IRUSR|S_IWUSR);
+	segment = semget(IPC_PRIVATE, svr->connections, S_IRUSR|S_IWUSR);
 	if (segment == -1)  
 	{
 		fprintf(stderr, "semget error--\n");
@@ -228,7 +228,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 	}
 
 	int i;
-	for (i=0; i<svr->num_of_connections; i++)
+	for (i=0; i<svr->connections; i++)
 	{
 		namy_connection *con;
 		int n=0;
@@ -259,14 +259,14 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 
 		fprintf(stderr, "namy_pool connected = id:%d scramble:%s\n", con->id, con->mysql->scramble);
 
-		if(svr->connections==NULL)
+		if(svr->next ==NULL)
 		{
-			svr->connections = con;
+			svr->next = con;
 		}
 		else
 		{
-			namy_connection* tmp = svr->connections;
-			svr->connections = con;
+			namy_connection* tmp = svr->next;
+			svr->next = con;
 			con->next = tmp;
 		}
 	}
@@ -291,7 +291,7 @@ static int namy_pool_info_handler(request_rec *r)
 	namy_svr_cfg *svr = ap_get_module_config(r->server->module_config, &namy_pool_module);
 	namy_connection *tmp = NULL;
 	ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>shm number</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
-	for (tmp = svr->connections; tmp!=NULL; )
+	for (tmp = svr->next; tmp!=NULL; )
 	{
 		ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>\n",
 				tmp->id,
