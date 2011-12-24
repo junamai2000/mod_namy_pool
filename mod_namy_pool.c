@@ -506,7 +506,7 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
     {
-      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td></tr>\n",
+      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td></tr>\n",
           tmp->id,
           ap_escape_html(r->pool, tmp->mysql->scramble),
           tmp->info->num_of_used,
