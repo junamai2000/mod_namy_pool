@@ -31,7 +31,7 @@ MYSQL *namy_attach_pool_connection(server_rec *s)
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
   namy_connection *con = NULL;
   namy_connection *tmp = NULL;
-  for (tmp = svr->next; tmp!=NULL; )
+  for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if (tmp->info->in_use == 0)
     {
@@ -39,7 +39,6 @@ MYSQL *namy_attach_pool_connection(server_rec *s)
       //fprintf(fp, "namy_pool: attach con->id = %d\n", con->id);
       break;
     }
-    tmp = tmp->next;
   }
 
   // 全部使用中なので最初のコネクションを待機
@@ -76,14 +75,13 @@ int namy_detach_pool_connection(server_rec *s, MYSQL *mysql)
   // 空きコネクション取得
   namy_connection *tmp = NULL;
   namy_connection *con = NULL;
-  for (tmp = svr->next; tmp!=NULL; )
+  for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
     {
       con = tmp;
       break;
     }
-    tmp = tmp->next;
   }
 
   // unknown connection
@@ -109,12 +107,11 @@ void namy_close_pool_connection(server_rec *s)
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
   namy_connection *tmp;
   shmctl(svr->shm, IPC_RMID, NULL);
-  for (tmp = svr->next; tmp!=NULL; )
+  for (tmp = svr->next; tmp!=NULL; tmp = tmp->next)
   {
     semctl(tmp->shm, 0, IPC_RMID);
     TRACE("[mod_namy_pool] connection is closed, id:%d scramble:%s", tmp->id, tmp->mysql->scramble);
     mysql_close(tmp->mysql);
-    tmp = tmp->next;
   }
 }
 
@@ -123,14 +120,13 @@ int namy_is_pooled_connection(server_rec *s, MYSQL *mysql)
   namy_svr_cfg *svr = ap_get_module_config(s->module_config, &namy_pool_module);
   namy_connection *tmp = NULL;
   namy_connection *con = NULL;
-  for (tmp = svr->next; tmp!=NULL; )
+  for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
     {
       con = tmp;
       return NAMY_OK;
     }
-    tmp = tmp->next;
   }
   return NAMY_UNKNOWN_CONNECTION;
 }
@@ -293,7 +289,7 @@ static int namy_pool_info_handler(request_rec *r)
   namy_svr_cfg *svr = ap_get_module_config(r->server->module_config, &namy_pool_module);
   namy_connection *tmp = NULL;
   ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>shm number</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
-  for (tmp = svr->next; tmp!=NULL; )
+  for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
     ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td><td>%d</td></tr>\n",
         tmp->id,
@@ -302,7 +298,6 @@ static int namy_pool_info_handler(request_rec *r)
         tmp->info->num_of_used,
         tmp->info->in_use
         );
-    tmp = tmp->next;
   }
   ap_rputs("</table>", r);
 
