@@ -97,7 +97,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     sembuffer.sem_flg = SEM_UNDO;  
     semop(svr->sem, &sembuffer, 1);  
     
-    svr->stat->num_of_conflicted++; // コネクション待ち発生
+    svr->stat->conflicted++; // コネクション待ち発生
     
     sembuffer.sem_op = 1;  
     sembuffer.sem_flg = SEM_UNDO;
@@ -112,7 +112,8 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   semop(svr->sem, &sembuffer, 1);  
   // 使用中にする
   tmp->info->in_use = 1;
-  tmp->info->num_of_used++;
+  tmp->info->count++;
+  tmp->info->pid = getppid();
 
   // pingのコストが大きいならタイマーとか最終使用日時とかで回数を減らす
   //if (mysql_ping(tmp->mysql) != 0)
@@ -165,6 +166,7 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     // 解放
     struct sembuf sembuffer;  
     tmp->info->in_use = 0;
+    tmp->info->pid = 0;
     DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
 
     sembuffer.sem_num = tmp->id;
@@ -430,21 +432,14 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       con = (namy_connection*)apr_palloc(pconf, sizeof(namy_connection));
       con->id = i;
       con->info = info;
-      con->info->in_use=0;
-      con->info->num_of_used=0;
+      con->info->in_use = 0;
+      con->info->count = 0;
+      con->info->pid = 0;
       con->next = NULL;
       // mysql connect
       MYSQL* mysql;
       mysql = mysql_init(NULL);
-      mysql_real_connect(mysql,
-          svr->server, svr->user,
-          svr->pw, svr->db, svr->port,
-          svr->socket, svr->option);
-      if (mysql==NULL)
-      {
-        TRACES("[mod_namy_pool] %s: connection to %s failed", con_name, svr->server);
-        return !OK;
-      }
+
       //------------------------------------------------
       // Note: mysql_real_connect() incorrectly reset 
       // the MYSQL_OPT_RECONNECT option to its default value 
@@ -457,6 +452,17 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       //-------------------------------------------------
       my_bool my_true = TRUE;
       mysql_options(mysql, MYSQL_OPT_RECONNECT, &my_true);
+      
+      mysql_real_connect(mysql,
+          svr->server, svr->user,
+          svr->pw, svr->db, svr->port,
+          svr->socket, svr->option);
+      if (mysql==NULL)
+      {
+        TRACES("[mod_namy_pool] %s: connection to %s failed", con_name, svr->server);
+        return !OK;
+      }
+      // copy to pool
       con->mysql = mysql;
 
       // 共有スペースのアドレスを先に進める
@@ -471,7 +477,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     }
     // 統計情報のアドレス
     svr->stat = (namy_stat*)info;
-    svr->stat->num_of_conflicted = 0;
+    svr->stat->conflicted = 0;
     // 統計情報のセマフォ初期化 セマフォ番号は０から始まるから+1しない
     if (semctl(svr->sem, svr->connections, SETVAL, 1) != 0)
     {
@@ -521,17 +527,18 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Server Database: </b>%s<br />", svr->db);
     ap_rprintf(r, "<b>Server SHM: </b>%d<br />", svr->shm);
     ap_rprintf(r, "<b>Connection SEM: </b>%d<br />", svr->sem);
-    ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->num_of_conflicted);
+    ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->conflicted);
 
     namy_connection *tmp = NULL;
-    ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>number of connection used</td><td>is connection used?</td></tr>\n", r); 
+    ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>count</td><td>in use</td><td>current user</td></tr>\n", r); 
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
     {
-      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td></tr>\n",
+      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td></tr>\n",
           tmp->id,
           ap_escape_html(r->pool, tmp->mysql->scramble),
-          tmp->info->num_of_used,
-          tmp->info->in_use
+          tmp->info->count,
+          tmp->info->in_use,
+          tmp->info->pid
           );
     }
     ap_rputs("</table>", r);

@@ -10,12 +10,13 @@
 // 書き込みが発生するので、shmに入れる
 typedef struct {
   int in_use; // 使用中なら1, それ以外は0
-  unsigned long num_of_used; // 使われた回数
+  unsigned long count; // 使われた回数
+  pid_t pid; //利用してるプロセス
 } namy_cinfo;
 
 // 統計情報
 typedef struct {
-  unsigned long  num_of_conflicted;
+  unsigned long  conflicted;
 } namy_stat;
 
 // コネクション保存構造体
