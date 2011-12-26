@@ -2,6 +2,9 @@
 #ifndef _mod_namy_pool_h
 #define _mod_namy_pool_h 
 
+#include <sys/time.h>
+#include <time.h>
+
 #include "httpd.h"
 #include "mysql.h"
 #include "apr_hash.h"
@@ -12,6 +15,9 @@ typedef struct {
   int in_use; // 使用中なら1, それ以外は0
   unsigned long count; // 使われた回数
   pid_t pid; //利用してるプロセス
+  double start;
+  double avg;
+  double max;
 } namy_cinfo;
 
 // 統計情報

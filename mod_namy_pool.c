@@ -62,7 +62,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     return NULL;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
-  if (entry)
+  if (entry==NULL)
     return NULL;
 
   namy_svr_cfg *svr = (namy_svr_cfg *)apr_hash_get(entry->table, connection_pool_name, APR_HASH_KEY_STRING);
@@ -119,6 +119,11 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   tmp->info->in_use = 1;
   tmp->info->count++;
   tmp->info->pid = getppid();
+  // 統計情報
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  tmp->info->start = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
+
 
   // pingのコストが大きいならタイマーとか最終使用日時とかで回数を減らす
   //if (mysql_ping(tmp->mysql) != 0)
@@ -178,6 +183,15 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     struct sembuf sembuffer;  
     tmp->info->in_use = 0;
     tmp->info->pid = 0;
+    // 統計情報
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    double end = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
+    double diff = end - tmp->info->start;
+    tmp->info->avg = (tmp->info->avg + diff)/2;
+    if (tmp->info->max<diff)
+      tmp->info->max = diff;
+
     DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
 
     sembuffer.sem_num = tmp->id;
@@ -551,15 +565,17 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->conflicted);
 
     namy_connection *tmp = NULL;
-    ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>count</td><td>in use</td><td>current user</td></tr>\n", r); 
+    ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>count</td><td>in use</td><td>current user</td><td>avg</td><td>max</td></tr>\n", r); 
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
     {
-      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td></tr>\n",
+      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td><td>%10.20f</td><td>%10.20f</td></tr>\n",
           tmp->id,
           ap_escape_html(r->pool, tmp->mysql->scramble),
           tmp->info->count,
           tmp->info->in_use,
-          tmp->info->pid
+          tmp->info->pid,
+          tmp->info->avg,
+          tmp->info->max
           );
     }
     ap_rputs("</table>", r);
