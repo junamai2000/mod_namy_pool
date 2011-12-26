@@ -92,18 +92,19 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   }
 
   namy_connection *tmp = NULL;
+  int select = getpid()%svr->connections;
   for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
   {
-    if (tmp->info->in_use == 0)
-    {
-      DEBUG("[mod_namy_pool] %s: connection is attached, id:%d", connection_pool_name, tmp->id);
-      break;
-    }
+      if (tmp->id  == select)
+      {
+        break;
+      }
   }
 
-  // 全部使用中なので最初のコネクションを待機
-  if (tmp == NULL)
+  // 使用中なので記録 （空きを探すのもいいかも）
+  if (tmp->info->in_use == 1)
   {
+     /*
     // ランダムで待機コネクションを選択
     int wait = rand()%svr->connections;
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
@@ -114,6 +115,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
         break;
       }
     }
+    */
     // 統計情報作成
     if(svr->lock(svr->sem, svr->connections)!=0)
     {
@@ -128,7 +130,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
     }
-    DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d ramdom:%d", connection_pool_name, tmp->id, wait);
+    DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d", connection_pool_name, tmp->id);
   }
 
   //　コネクションロック
