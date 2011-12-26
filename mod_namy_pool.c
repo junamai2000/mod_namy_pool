@@ -141,7 +141,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   // 使用中にする
   tmp->info->in_use = 1;
   tmp->info->count++;
-  tmp->info->pid = getppid();
+  tmp->info->pid = getpid();
   // 統計情報
   struct timeval t;
   gettimeofday(&t, NULL);
