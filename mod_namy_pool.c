@@ -58,8 +58,13 @@ extern module AP_MODULE_DECLARE_DATA namy_pool_module;
  */
 MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_name)
 {
+  if (r==NULL)
+    return NULL;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  if (entry)
+    return NULL;
+
   namy_svr_cfg *svr = (namy_svr_cfg *)apr_hash_get(entry->table, connection_pool_name, APR_HASH_KEY_STRING);
   // 存在しないコネクションキー
   if (svr==NULL)
@@ -134,7 +139,13 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
  */
 int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
 {
+  if (r==NULL||mysql==NULL)
+    return !NAMY_OK;
+
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  if (entry==NULL)
+    return !NAMY_OK;
+
   apr_hash_index_t *hi;
   void *key, *val;
   // 各コネクションを取り出す
@@ -187,7 +198,11 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
  */
 void namy_close_pool_connection(server_rec *s)
 {
+  if (s==NULL)
+    return;
   namy_svr_hash *entry = ap_get_module_config(s->module_config, &namy_pool_module);
+  if (entry==NULL)
+    return;
   apr_hash_index_t *hi;
   void *key, *val;
   // 各コネクションを取り出す
@@ -231,7 +246,13 @@ void namy_close_pool_connection(server_rec *s)
  */
 int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
 {
+  if (r==NULL||mysql==NULL)
+    return NAMY_UNKNOWN_CONNECTION;
+
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  if (entry==NULL)
+    return NAMY_UNKNOWN_CONNECTION;
+
   apr_hash_index_t *hi;
   void *key, *val;
   // 各コネクションを取り出す
