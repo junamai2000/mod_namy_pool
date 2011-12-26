@@ -49,6 +49,25 @@
 
 extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
+// util function
+static int namy_sem_lock(int semid, int semnum)
+{
+  struct sembuf sembuffer;
+  sembuffer.sem_num = semnum; 
+  sembuffer.sem_op = -1;  
+  sembuffer.sem_flg = SEM_UNDO;  
+  return semop(semid, &sembuffer, 1);
+}
+
+static int namy_sem_unlock(int semid, int semnum)
+{
+  struct sembuf sembuffer;
+  sembuffer.sem_num = semnum; 
+  sembuffer.sem_op = 1;  
+  sembuffer.sem_flg = SEM_UNDO;  
+  return semop(semid, &sembuffer, 1);
+}
+
 // -------- start 外部API --------------------
 /**
  * コネクション取得
@@ -83,7 +102,6 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   }
 
   // 全部使用中なので最初のコネクションを待機
-  struct sembuf sembuffer;  
   if (tmp == NULL)
   {
     // ランダムで待機コネクションを選択
@@ -97,24 +115,29 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
       }
     }
     // 統計情報作成
-    sembuffer.sem_num = svr->connections+1;  
-    sembuffer.sem_op = -1;  
-    sembuffer.sem_flg = SEM_UNDO;  
-    semop(svr->sem, &sembuffer, 1);  
-    
+    if(svr->lock(svr->sem, svr->connections)!=0)
+    {
+      TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
+      return NULL;
+    }
+
     svr->stat->conflicted++; // コネクション待ち発生
     
-    sembuffer.sem_op = 1;  
-    sembuffer.sem_flg = SEM_UNDO;
-    semop(svr->sem, &sembuffer, 1);
+    if(svr->unlock(svr->sem, svr->connections)!=0)
+    {
+      TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
+      return NULL;
+    }
     DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d ramdom:%d", connection_pool_name, tmp->id, wait);
   }
 
   //　コネクションロック
-  sembuffer.sem_num = tmp->id;  
-  sembuffer.sem_op = -1;  
-  sembuffer.sem_flg = SEM_UNDO;  
-  semop(svr->sem, &sembuffer, 1);  
+  if(svr->lock(svr->sem, tmp->id)!=0)
+  {
+    TRACE("[mod_namy_pool]: conection lock failed, sem:%d, id:%d", svr->sem, tmp->id);
+    return NULL;
+  }
+  
   // 使用中にする
   tmp->info->in_use = 1;
   tmp->info->count++;
@@ -180,7 +203,6 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     }
 
     // 解放
-    struct sembuf sembuffer;  
     tmp->info->in_use = 0;
     tmp->info->pid = 0;
     // 統計情報
@@ -194,10 +216,11 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
 
     DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
 
-    sembuffer.sem_num = tmp->id;
-    sembuffer.sem_op = 1;  
-    sembuffer.sem_flg = SEM_UNDO;  
-    semop(svr->sem, &sembuffer, 1);
+    //　コネクションアンロック
+    if(svr->unlock(svr->sem, tmp->id)!=0)
+    {
+      TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", svr->sem, tmp->id);
+    }
     return NAMY_OK;
   }
   return NAMY_UNKNOWN_CONNECTION;
@@ -513,6 +536,8 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     // 統計情報のアドレス
     svr->stat = (namy_stat*)info;
     svr->stat->conflicted = 0;
+    svr->lock = (void *)&namy_sem_lock;
+    svr->unlock = (void *)&namy_sem_unlock;
     // 統計情報のセマフォ初期化 セマフォ番号は０から始まるから+1しない
     if (semctl(svr->sem, svr->connections, SETVAL, 1) != 0)
     {

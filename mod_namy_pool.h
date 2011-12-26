@@ -15,9 +15,9 @@ typedef struct {
   int in_use; // 使用中なら1, それ以外は0
   unsigned long count; // 使われた回数
   pid_t pid; //利用してるプロセス
-  double start;
-  double avg;
-  double max;
+  double start; // lockした時間
+  double avg; // 平均lock時間
+  double max; // 最大lock時間
 } namy_cinfo;
 
 // 統計情報
@@ -33,6 +33,9 @@ typedef struct _namy_connection {
   struct _namy_connection *next; // リンクリスト
 } namy_connection;
 
+// unlock,lock関数
+typedef int (*util_func)(int semid, int semnum);
+
 // サーバーセッティング
 typedef struct {
   const char *server;
@@ -45,6 +48,8 @@ typedef struct {
   int connections;
   int shm;
   int sem;
+  util_func lock;
+  util_func unlock;
   namy_stat *stat;
   namy_connection* next; // 全コネクションにアクセス
 } namy_svr_cfg;
