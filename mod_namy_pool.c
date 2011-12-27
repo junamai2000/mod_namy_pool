@@ -323,7 +323,7 @@ int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
 }
 // -------- end 外部API --------------------
 
-// -------- start 内i部の関数 ---------------------
+// -------- start 内部の関数 ---------------------
 // conf解析関数
 // 設定のサンプル
 //  NAMY_POOL "test"

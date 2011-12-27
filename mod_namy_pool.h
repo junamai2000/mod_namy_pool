@@ -64,5 +64,5 @@ typedef struct {
 MYSQL* namy_attach_pool_connection(request_rec *r, const char* connection_pool_name);
 int    namy_detach_pool_connection(request_rec *r, MYSQL *mysql);
 void   namy_close_pool_connection(server_rec *s);
-int    Namy_is_pooled_connection(request_rec *r, MYSQL *mysql);
+int    namy_is_pooled_connection(request_rec *r, MYSQL *mysql);
 #endif
