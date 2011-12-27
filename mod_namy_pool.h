@@ -22,7 +22,7 @@ typedef struct {
 
 // 統計情報
 typedef struct {
-  unsigned long  conflicted;
+  unsigned long  conflicted; // ロック待ち
 } namy_stat;
 
 // コネクション保存構造体
@@ -45,17 +45,17 @@ typedef struct {
   const char *socket;
   int port;
   int option;
-  int connections;
-  int shm;
-  int sem;
-  util_func lock;
-  util_func unlock;
-  namy_stat *stat;
+  int connections; // 接続するコネクション数
+  int shm; // 共有メモリ用 (namy_statとか)
+  int sem; // コネクションロック用セマフォ
+  util_func lock; // ロック関数用ポインタ
+  util_func unlock; // アンロック用関数ポインタ
+  namy_stat *stat; // 統計情報
   namy_connection* next; // 全コネクションにアクセス
 } namy_svr_cfg;
 
 typedef struct {
-  apr_hash_t *table;
+  apr_hash_t *table; // key->connection でnamy_svr_cfgを保存
 } namy_svr_hash;
 
 // ユーティリティー

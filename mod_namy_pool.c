@@ -77,16 +77,17 @@ static int namy_sem_unlock(int semid, int semnum)
  */
 MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_name)
 {
-  if (r==NULL)
+  // 引数チェック
+  if (r == NULL)
     return NULL;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
-  if (entry==NULL)
+  if (entry == NULL)
     return NULL;
 
   namy_svr_cfg *svr = (namy_svr_cfg *)apr_hash_get(entry->table, connection_pool_name, APR_HASH_KEY_STRING);
   // 存在しないコネクションキー
-  if (svr==NULL)
+  if (svr == NULL)
   {
     return NULL;
   }
@@ -104,7 +105,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   // 使用中なので記録 （空きを探すのもいいかも）
   if (tmp->info->in_use == 1)
   {
-     /*
+    /*
     // ランダムで待機コネクションを選択
     int wait = rand()%svr->connections;
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
@@ -117,7 +118,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     }
     */
     // 統計情報作成
-    if(svr->lock(svr->sem, svr->connections)!=0)
+    if(svr->lock(svr->sem, svr->connections) != 0)
     {
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
@@ -125,7 +126,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
 
     svr->stat->conflicted++; // コネクション待ち発生
     
-    if(svr->unlock(svr->sem, svr->connections)!=0)
+    if(svr->unlock(svr->sem, svr->connections) != 0)
     {
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
@@ -134,7 +135,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   }
 
   //　コネクションロック
-  if(svr->lock(svr->sem, tmp->id)!=0)
+  if(svr->lock(svr->sem, tmp->id) != 0)
   {
     TRACE("[mod_namy_pool]: conection lock failed, sem:%d, id:%d", svr->sem, tmp->id);
     return NULL;
@@ -169,11 +170,12 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
  */
 int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
 {
-  if (r==NULL||mysql==NULL)
+  // 引数チェック
+  if (r == NULL || mysql == NULL)
     return !NAMY_OK;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
-  if (entry==NULL)
+  if (entry == NULL)
     return !NAMY_OK;
 
   apr_hash_index_t *hi;
@@ -213,13 +215,13 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     double end = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
     double diff = end - tmp->info->start;
     tmp->info->avg = (tmp->info->avg + diff)/2;
-    if (tmp->info->max<diff)
+    if (tmp->info->max < diff)
       tmp->info->max = diff;
 
     DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
 
     //　コネクションアンロック
-    if(svr->unlock(svr->sem, tmp->id)!=0)
+    if(svr->unlock(svr->sem, tmp->id) != 0)
     {
       TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", svr->sem, tmp->id);
     }
@@ -237,11 +239,14 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
  */
 void namy_close_pool_connection(server_rec *s)
 {
-  if (s==NULL)
+  // 引数チェック
+  if (s == NULL)
     return;
+
   namy_svr_hash *entry = ap_get_module_config(s->module_config, &namy_pool_module);
-  if (entry==NULL)
+  if (entry == NULL)
     return;
+
   apr_hash_index_t *hi;
   void *key, *val;
   // 各コネクションを取り出す
@@ -285,6 +290,7 @@ void namy_close_pool_connection(server_rec *s)
  */
 int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
 {
+  // 引数チェック
   if (r==NULL||mysql==NULL)
     return NAMY_UNKNOWN_CONNECTION;
 
@@ -517,7 +523,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
           svr->server, svr->user,
           svr->pw, svr->db, svr->port,
           svr->socket, svr->option);
-      if (mysql==NULL)
+      if (mysql == NULL)
       {
         TRACES("[mod_namy_pool] %s: connection to %s failed", con_name, svr->server);
         return !OK;
@@ -592,7 +598,17 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->conflicted);
 
     namy_connection *tmp = NULL;
-    ap_rputs("<table border=\"1\"><tr><td>connection id</td><td>mysql scrable string</td><td>count</td><td>in use</td><td>current user</td><td>avg</td><td>max</td></tr>\n", r); 
+
+    ap_rputs("<table border=\"1\"><tr>"
+             "<td>connection id</td>"
+             "<td>mysql scrable string</td>"
+             "<td>count</td>"
+             "<td>in use</td>"
+             "<td>current user</td>"
+             "<td>avg</td>"
+             "<td>max</td>"
+             "</tr>\n", r); 
+
     for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
     {
       ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td><td>%10.20f</td><td>%10.20f</td></tr>\n",
@@ -605,6 +621,7 @@ static int namy_pool_info_handler(request_rec *r)
           tmp->info->max
           );
     }
+
     ap_rputs("</table>", r);
   }
 
