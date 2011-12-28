@@ -49,7 +49,12 @@
 
 extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
-// util function
+/**
+ * セマフォロック 
+ * @param semid semaphore id 
+ * @param semnum semaphore number
+ * @return 0 for success, otherwise not 0 
+ */
 static int namy_sem_lock(int semid, int semnum)
 {
   struct sembuf sembuffer;
@@ -59,6 +64,12 @@ static int namy_sem_lock(int semid, int semnum)
   return semop(semid, &sembuffer, 1);
 }
 
+/**
+ * セマフォアンロック 
+ * @param semid semaphore id 
+ * @param semnum semaphore number
+ * @return 0 for success, otherwise not 0 
+ */
 static int namy_sem_unlock(int semid, int semnum)
 {
   struct sembuf sembuffer;
@@ -68,7 +79,17 @@ static int namy_sem_unlock(int semid, int semnum)
   return semop(semid, &sembuffer, 1);
 }
 
-// -------- start 外部API --------------------
+/**
+ * セマフォロック確認 
+ * @param semid semaphore id 
+ * @param semnum semaphore number
+ * @return 0 is locked 
+ */
+static int namy_sem_is_locked(int semid, int semnum)
+{
+  return semctl(semid, semnum, GETVAL);
+}
+
 /**
  * コネクション取得
  * @param r request_rec
@@ -82,6 +103,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     return NULL;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  // 念のためチェック
   if (entry == NULL)
     return NULL;
 
@@ -95,22 +117,21 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   //namy_connection *tmp = &(svr->table[getpid()%svr->connections]);
   int i = getpid()%svr->connections;
 
-  // 使用中なので記録 （空きを探すのもいいかも）
-  if (svr->table[i].info->in_use == 1)
+  // 使用中なので記録
+  if (svr->is_locked(svr->sem, svr->table[i].id) == 0)
   {
     // ランダムで待機コネクションを選択
-    // tmp = svr->table[rand()%svr->connections];
+    // コネクションが増えてきたら、なにかした方がいいかも
+    //i = rand()%svr->connections;
     
     // 統計情報作成
-    if(svr->lock(svr->sem, svr->connections) != 0)
+    if (svr->lock(svr->sem, svr->connections) != 0)
     {
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
     }
-
     svr->stat->conflicted++; // コネクション待ち発生
-    
-    if(svr->unlock(svr->sem, svr->connections) != 0)
+    if (svr->unlock(svr->sem, svr->connections) != 0)
     {
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
@@ -125,8 +146,6 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     return NULL;
   }
   
-  // 使用中にする
-  svr->table[i].info->in_use = 1;
   svr->table[i].info->count++;
   svr->table[i].info->pid = getpid();
   // 統計情報
@@ -158,6 +177,7 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     return !NAMY_OK;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  // 念のためチェック
   if (entry == NULL)
     return !NAMY_OK;
 
@@ -189,7 +209,6 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     }
 
     // 解放
-    svr->table[i].info->in_use = 0;
     svr->table[i].info->pid = 0;
     // 統計情報
     struct timeval t;
@@ -230,6 +249,7 @@ void namy_close_pool_connection(server_rec *s)
     return;
 
   apr_hash_index_t *hi;
+  // 念のためチェック
   void *key, *val;
   // 各コネクションを取り出す
   for (hi = apr_hash_first(NULL, entry->table); hi; hi = apr_hash_next(hi))
@@ -240,14 +260,22 @@ void namy_close_pool_connection(server_rec *s)
     char *con_name = (char*)key;
    
     // コネクションクローズ 
+    if (shmdt(svr->table[0].info) != 0)
+    {
+      TRACES("[mod_namy_pool] %s: svr->shm detach error", con_name);
+    }
     if (shmctl(svr->shm, 0, IPC_RMID) != 0)
     {
       TRACES("[mod_namy_pool] %s: svr->shm clean up error", con_name);
     }
-      
-    if(semctl(svr->sem, 0, IPC_RMID) != 0)
+    
+    //if (shmdt(svr->sem) != 0)
+    //{
+    //  TRACES("[mod_namy_pool] %s: svr->sem detach error", con_name);
+    //}
+    if (semctl(svr->sem, 0, IPC_RMID) != 0)
     {
-      TRACES("[mod_namy_pool] %s: svr->shm clean up error", con_name);
+      TRACES("[mod_namy_pool] %s: svr->sem clean up error", con_name);
     }
 
     int i;
@@ -276,6 +304,7 @@ int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
     return NAMY_UNKNOWN_CONNECTION;
 
   namy_svr_hash *entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  // 念のためチェック
   if (entry==NULL)
     return NAMY_UNKNOWN_CONNECTION;
 
@@ -299,7 +328,6 @@ int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
   }
   return NAMY_UNKNOWN_CONNECTION;
 }
-// -------- end 外部API --------------------
 
 // -------- start 内部の関数 ---------------------
 // conf解析関数
@@ -466,7 +494,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     int i;
     for (i = 0; i < svr->connections; i++)
     {
-      // コネクション用セマフォ初期か
+      // コネクション用セマフォ初期化
       if (semctl(svr->sem, i, SETVAL, 1) != 0)
       {
         TRACES("[mod_namy_pool] %s: semaphore segment error", con_name);
@@ -476,7 +504,6 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       // 構造体作成
       svr->table[i].id = i;
       svr->table[i].info = info;
-      svr->table[i].info->in_use = 0;
       svr->table[i].info->count = 0;
       svr->table[i].info->pid = 0;
 
@@ -515,8 +542,10 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     // 統計情報のアドレス
     svr->stat = (namy_stat*)info;
     svr->stat->conflicted = 0;
+    // 関数登録
     svr->lock = (void *)&namy_sem_lock;
     svr->unlock = (void *)&namy_sem_unlock;
+    svr->is_locked= (void *)&namy_sem_is_locked;
     // 統計情報のセマフォ初期化 セマフォ番号は０から始まるから+1しない
     if (semctl(svr->sem, svr->connections, SETVAL, 1) != 0)
     {
@@ -559,6 +588,7 @@ static int namy_pool_info_handler(request_rec *r)
     namy_svr_cfg *svr = (namy_svr_cfg*)val;
     char *con_name = (char*)key;
 
+    // プール毎の情報
     ap_rprintf(r, "<br /><b>Connection Pool Identity: <b>%s<br />", con_name);
     ap_rprintf(r, "<b>Server Name: </b>%s<br />", svr->server);
     ap_rprintf(r, "<b>Server Port: </b>%d<br />", svr->port);
@@ -568,29 +598,39 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Connection SEM: </b>%d<br />", svr->sem);
     ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->conflicted);
 
-    ap_rputs("<table border=\"1\"><tr>"
-             "<td>connection id</td>"
-             "<td>thread id in mysqld</td>"
-             "<td>mysql scrable string</td>"
-             "<td>count</td>"
-             "<td>in use</td>"
-             "<td>current user</td>"
-             "<td>avg</td>"
-             "<td>max</td>"
-             "</tr>\n", r); 
+    // コネクション毎の情報
+    ap_rputs(
+        "<table border=\"1\"><tr>"
+        "<td>connection id</td>"
+        "<td>thread id in mysqld</td>"
+        "<td>mysql scrable string</td>"
+        "<td>count</td>"
+        "<td>current user</td>"
+        "<td>avg</td>"
+        "<td>max</td>"
+        "<td>sem locked</td>"
+        "</tr>\n", r); 
 
     int i;
     for (i = 0; i < svr->connections; i++)
     {
-      ap_rprintf(r, "<tr><td>%d</td><td>%ld</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td><td>%10.20f</td><td>%10.20f</td></tr>\n",
+      ap_rprintf(r, 
+          "<tr><td>%d</td>"
+          "<td>%ld</td>"
+          "<td>%s</td>"
+          "<td>%ld</td>"
+          "<td>%d</td>"
+          "<td>%10.20f</td>"
+          "<td>%10.20f</td>"
+          "<td>%d</td></tr>\n",
           svr->table[i].id,
           svr->table[i].mysql->thread_id,
           ap_escape_html(r->pool, svr->table[i].mysql->scramble),
           svr->table[i].info->count,
-          svr->table[i].info->in_use,
           svr->table[i].info->pid,
           svr->table[i].info->avg,
-          svr->table[i].info->max
+          svr->table[i].info->max,
+          (svr->is_locked(svr->sem, svr->table[i].id) == 0)? 1: 0
           );
     }
 

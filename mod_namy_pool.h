@@ -12,7 +12,6 @@
 // コネクションの状態
 // 書き込みが発生するので、shmに入れる
 typedef struct {
-  int in_use; // 使用中なら1, それ以外は0
   unsigned long count; // 使われた回数
   pid_t pid; //利用してるプロセス
   double start; // lockした時間
@@ -22,7 +21,7 @@ typedef struct {
 
 // 統計情報
 typedef struct {
-  unsigned long  conflicted; // ロック待ち
+  unsigned long  conflicted; // ロック待ち発生回数
 } namy_stat;
 
 // コネクション保存構造体
@@ -49,6 +48,7 @@ typedef struct {
   int sem; // コネクションロック用セマフォ
   util_func lock; // ロック関数用ポインタ
   util_func unlock; // アンロック用関数ポインタ
+  util_func is_locked; // ロック確認
   namy_stat *stat; // 統計情報
   namy_connection* table; // 全コネクションにアクセス
 } namy_svr_cfg;
