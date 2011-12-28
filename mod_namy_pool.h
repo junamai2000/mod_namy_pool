@@ -30,7 +30,6 @@ typedef struct _namy_connection {
   int id;
   MYSQL *mysql; // コネクション
   namy_cinfo *info; // コネクション状態
-  struct _namy_connection *next; // リンクリスト
 } namy_connection;
 
 // unlock,lock関数
@@ -51,7 +50,7 @@ typedef struct {
   util_func lock; // ロック関数用ポインタ
   util_func unlock; // アンロック用関数ポインタ
   namy_stat *stat; // 統計情報
-  namy_connection* next; // 全コネクションにアクセス
+  namy_connection* table; // 全コネクションにアクセス
 } namy_svr_cfg;
 
 typedef struct {

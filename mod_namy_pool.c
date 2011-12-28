@@ -92,31 +92,15 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     return NULL;
   }
 
-  namy_connection *tmp = NULL;
-  int select = getpid()%svr->connections;
-  for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
-  {
-      if (tmp->id  == select)
-      {
-        break;
-      }
-  }
+  //namy_connection *tmp = &(svr->table[getpid()%svr->connections]);
+  int i = getpid()%svr->connections;
 
   // 使用中なので記録 （空きを探すのもいいかも）
-  if (tmp->info->in_use == 1)
+  if (svr->table[i].info->in_use == 1)
   {
-    /*
     // ランダムで待機コネクションを選択
-    int wait = rand()%svr->connections;
-    for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
-    {
-      // ランダムで指定されたコネクションを取得
-      if (tmp->id  == wait)
-      {
-        break;
-      }
-    }
-    */
+    // tmp = svr->table[rand()%svr->connections];
+    
     // 統計情報作成
     if(svr->lock(svr->sem, svr->connections) != 0)
     {
@@ -131,24 +115,24 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
       TRACE("[mod_namy_pool]: lock failed for stat, sem:%d, id:%d", svr->sem, svr->connections);
       return NULL;
     }
-    DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d", connection_pool_name, tmp->id);
+    DEBUG("[mod_namy_pool] %s: connection is too busy, wait = id:%d", connection_pool_name, svr->table[i].id);
   }
 
   //　コネクションロック
-  if(svr->lock(svr->sem, tmp->id) != 0)
+  if(svr->lock(svr->sem, svr->table[i].id) != 0)
   {
-    TRACE("[mod_namy_pool]: conection lock failed, sem:%d, id:%d", svr->sem, tmp->id);
+    TRACE("[mod_namy_pool]: conection lock failed, sem:%d, id:%d", svr->sem, svr->table[i].id);
     return NULL;
   }
   
   // 使用中にする
-  tmp->info->in_use = 1;
-  tmp->info->count++;
-  tmp->info->pid = getpid();
+  svr->table[i].info->in_use = 1;
+  svr->table[i].info->count++;
+  svr->table[i].info->pid = getpid();
   // 統計情報
   struct timeval t;
   gettimeofday(&t, NULL);
-  tmp->info->start = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
+  svr->table[i].info->start = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
 
 
   // pingのコストが大きいならタイマーとか最終使用日時とかで回数を減らす
@@ -157,8 +141,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   //  TRACE("[mod_namy_pool] %s: connection ping failed, id:%d", connection_pool_name, tmp->id);
   //}
 
-  return tmp->mysql;	
-
+  return svr->table[i].mysql;	
 }
 
 /**
@@ -188,42 +171,41 @@ int namy_detach_pool_connection(request_rec *r, MYSQL *mysql)
     namy_svr_cfg *svr = (namy_svr_cfg*)val;
     char *con_name = (char*)key;
 
-    namy_connection *tmp = NULL;
-    for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
+    int i, not_found = 1; 
+    for (i = 0; i < svr->connections; i++)
     {
       // 同一のコネクションかどうか
-      // scrambleよりもポインタ比較の方が速いので採用
-      //if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
-      if (tmp->mysql == mysql)
+      if (svr->table[i].mysql == mysql)
       {
+        not_found = 0;
         break;
       }
     }
 
     // unknown connection 次のテーブルへ
-    if (tmp == NULL)
+    if (not_found)
     {
       continue;
     }
 
     // 解放
-    tmp->info->in_use = 0;
-    tmp->info->pid = 0;
+    svr->table[i].info->in_use = 0;
+    svr->table[i].info->pid = 0;
     // 統計情報
     struct timeval t;
     gettimeofday(&t, NULL);
     double end = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
-    double diff = end - tmp->info->start;
-    tmp->info->avg = (tmp->info->avg + diff)/2;
-    if (tmp->info->max < diff)
-      tmp->info->max = diff;
+    double diff = end - svr->table[i].info->start;
+    svr->table[i].info->avg = (svr->table[i].info->avg + diff)/2;
+    if (svr->table[i].info->max < diff)
+      svr->table[i].info->max = diff;
 
-    DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, tmp->id);
+    DEBUG("[mod_namy_pool] %s: connection is detached, id:%d", con_name, svr->table[i].id);
 
     //　コネクションアンロック
-    if(svr->unlock(svr->sem, tmp->id) != 0)
+    if(svr->unlock(svr->sem, svr->table[i].id) != 0)
     {
-      TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", svr->sem, tmp->id);
+      TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", svr->sem, svr->table[i].id);
     }
     return NAMY_OK;
   }
@@ -258,7 +240,6 @@ void namy_close_pool_connection(server_rec *s)
     char *con_name = (char*)key;
    
     // コネクションクローズ 
-    namy_connection *tmp;
     if (shmctl(svr->shm, 0, IPC_RMID) != 0)
     {
       TRACES("[mod_namy_pool] %s: svr->shm clean up error", con_name);
@@ -266,19 +247,19 @@ void namy_close_pool_connection(server_rec *s)
       
     if(semctl(svr->sem, 0, IPC_RMID) != 0)
     {
-      TRACES("[mod_namy_pool] %s: tmp->shm clean up error", con_name);
+      TRACES("[mod_namy_pool] %s: svr->shm clean up error", con_name);
     }
 
-    for (tmp = svr->next; tmp!=NULL; tmp = tmp->next)
+    int i;
+    for (i = 0; i < svr->connections; i++)
     {
-      //DEBUG("[mod_namy_pool] %s: connection is closed, id:%d scramble:%s",
-      //  con_name, tmp->id, tmp->mysql->scramble);
-      mysql_close(tmp->mysql);
+      TRACES("[mod_namy_pool] %s: connection is closed, id:%d scramble:%s",
+        con_name, svr->table[i].id, svr->table[i].mysql->scramble);
+      mysql_close(svr->table[i].mysql);
     }
     TRACES("[mod_namy_pool] %s: connection is closed, server:%s",
       con_name, svr->server);
   }
-
 }
 
 /**
@@ -307,13 +288,10 @@ int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
     // confで設定したコネクション情報取得
     namy_svr_cfg *svr = (namy_svr_cfg*)val;
     // 全コネクションチェック  
-    namy_connection *tmp = NULL;
-    for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
+    int i;
+    for (i = 0; i < svr->connections; i++)
     {
-      // ポインタ(アドレスが同じ)調べるだけでいいんじゃないか？
-      // 違うサーバーに接続した時にscrambleは一緒になるんじゃね？
-      //if(strncmp(tmp->mysql->scramble, mysql->scramble, SCRAMBLE_LENGTH) == 0)
-      if (tmp->mysql == mysql)
+      if (svr->table[i].mysql == mysql)
       {
         return NAMY_OK;
       }
@@ -402,7 +380,6 @@ static const char *namy_parse_connection(cmd_parms *cmd, void *dbconf, const cha
   }
   svr->shm = 0;
   svr->sem = 0;
-  svr->next = NULL;
 
   // TRACE
   ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, cmd->server,
@@ -483,9 +460,11 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     }
     svr->sem = segment;
 
+    // svr->table
+    svr->table = (namy_connection*)apr_palloc(pconf, sizeof(namy_connection)*svr->connections);
+
     int i;
-    namy_connection *con;
-    for (i=0; i<svr->connections; i++)
+    for (i = 0; i < svr->connections; i++)
     {
       // コネクション用セマフォ初期か
       if (semctl(svr->sem, i, SETVAL, 1) != 0)
@@ -495,17 +474,14 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       }
 
       // 構造体作成
-      con = (namy_connection*)apr_palloc(pconf, sizeof(namy_connection));
-      con->id = i;
-      con->info = info;
-      con->info->in_use = 0;
-      con->info->count = 0;
-      con->info->pid = 0;
-      con->next = NULL;
-      // mysql connect
-      MYSQL* mysql;
-      mysql = mysql_init(NULL);
+      svr->table[i].id = i;
+      svr->table[i].info = info;
+      svr->table[i].info->in_use = 0;
+      svr->table[i].info->count = 0;
+      svr->table[i].info->pid = 0;
 
+      // mysql connect
+      MYSQL* mysql = mysql_init(NULL);
       //------------------------------------------------
       // Note: mysql_real_connect() incorrectly reset 
       // the MYSQL_OPT_RECONNECT option to its default value 
@@ -529,17 +505,12 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         return !OK;
       }
       // copy to pool
-      con->mysql = mysql;
+      svr->table[i].mysql = mysql;
 
       // 共有スペースのアドレスを先に進める
       info++;
       ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s,
-        "[mod_namy_pool] %s: connected = id:%d scramble:%s", con_name, con->id, con->mysql->scramble);
-
-      // コネクションのリンクリスト
-      namy_connection* tmp = svr->next;
-      svr->next = con;
-      con->next = tmp;
+        "[mod_namy_pool] %s: connected = id:%d scramble:%s", con_name, svr->table[i].id, svr->table[i].mysql->scramble);
     }
     // 統計情報のアドレス
     svr->stat = (namy_stat*)info;
@@ -597,10 +568,9 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rprintf(r, "<b>Connection SEM: </b>%d<br />", svr->sem);
     ap_rprintf(r, "<b>Conflict: </b>%ld<br />", svr->stat->conflicted);
 
-    namy_connection *tmp = NULL;
-
     ap_rputs("<table border=\"1\"><tr>"
              "<td>connection id</td>"
+             "<td>thread id in mysqld</td>"
              "<td>mysql scrable string</td>"
              "<td>count</td>"
              "<td>in use</td>"
@@ -609,16 +579,18 @@ static int namy_pool_info_handler(request_rec *r)
              "<td>max</td>"
              "</tr>\n", r); 
 
-    for (tmp = svr->next; tmp != NULL; tmp = tmp->next)
+    int i;
+    for (i = 0; i < svr->connections; i++)
     {
-      ap_rprintf(r, "<tr><td>%d</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td><td>%10.20f</td><td>%10.20f</td></tr>\n",
-          tmp->id,
-          ap_escape_html(r->pool, tmp->mysql->scramble),
-          tmp->info->count,
-          tmp->info->in_use,
-          tmp->info->pid,
-          tmp->info->avg,
-          tmp->info->max
+      ap_rprintf(r, "<tr><td>%d</td><td>%ld</td><td>%s</td><td>%ld</td><td>%d</td><td>%d</td><td>%10.20f</td><td>%10.20f</td></tr>\n",
+          svr->table[i].id,
+          svr->table[i].mysql->thread_id,
+          ap_escape_html(r->pool, svr->table[i].mysql->scramble),
+          svr->table[i].info->count,
+          svr->table[i].info->in_use,
+          svr->table[i].info->pid,
+          svr->table[i].info->avg,
+          svr->table[i].info->max
           );
     }
 
