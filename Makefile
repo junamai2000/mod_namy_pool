@@ -16,6 +16,7 @@ install: install-modules-yes
 
 clean:
 	-rm -f mod_my_pool.o mod_my_pool.lo mod_my_pool.slo mod_my_pool.la 
+	-rm -f mod_my_pool_test.o mod_my_pool_test.lo mod_my_pool_test.slo mod_my_pool_test.la 
 
 test: reload
 	lynx -mime_header http://localhost/connections
