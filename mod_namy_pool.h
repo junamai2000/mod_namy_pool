@@ -35,7 +35,7 @@ typedef struct _namy_connection {
 typedef int (*util_func)(int semid, int semnum);
 
 // サーバーセッティング
-typedef struct {
+typedef struct _namy_connection_cfg {
   const char *server;
   const char *user;
   const char *pw;
@@ -44,18 +44,40 @@ typedef struct {
   int port;
   int option;
   int connections; // 接続するコネクション数
-  int shm; // 共有メモリ用 (namy_statとか)
+  int weight;
+  int priority;
   int sem; // コネクションロック用セマフォ
   util_func lock; // ロック関数用ポインタ
   util_func unlock; // アンロック用関数ポインタ
   util_func is_locked; // ロック確認
   namy_stat *stat; // 統計情報
   namy_connection* table; // 全コネクションにアクセス
-} namy_svr_cfg;
+  struct _namy_connection_cfg *next; // 1 pool に複数サーバー
+} namy_connection_cfg;
 
+// バランシングテーブル
+typedef struct {
+  int total_weight;
+  int total_priority;
+  int *weight; // 重みテーブル
+  int *weight_status;
+  int *priority; // 優先度テーブル 冗長構成用
+} balancer;
+
+// プール毎の設定
+typedef struct {
+  char *name;
+  int servers;  // プールに何台サーバーがあるか
+  int connections; // プール全体のコネクション数
+  int shm;
+  balancer *bl;
+  namy_connection_cfg *next;
+} namy_dir_cfg;
+
+// 全体の設定
 typedef struct {
   apr_hash_t *table; // key->connection でnamy_svr_cfgを保存
-} namy_svr_hash;
+} namy_svr_cfg;
 
 // ユーティリティー
 #define NAMY_UNKNOWN_CONNECTION 0

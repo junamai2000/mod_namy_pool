@@ -6,8 +6,18 @@
 LoadModule namy_pool_module modules/mod_namy_pool.so
 
 # make pooling 
-NAMY_POOL "test"  "server=localhost;db=namai;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5"
-NAMY_POOL "test2" "server=db.namai.jp;db=test;user=namai;port=3340;password=namai;connestion=1"
+<NamyPool test>
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5;weight=10"
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=2;weight=10"
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5;weight=10"
+</NamyPool>
+
+<NamyPool test2>
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=3;weight=10"
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=2;weight=10"
+  PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5;weight=10"
+</NamyPool>
+
 
 # show information 
 <Location /connections>
