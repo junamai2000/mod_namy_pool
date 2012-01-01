@@ -46,7 +46,12 @@ static int namy_pool_test_handler(request_rec *r)
 	if (mysql==NULL)
 		return OK;
 
-	mysql_query(mysql, "select * from test limit 100");
+	if(mysql_query(mysql, "select * from test limit 100"))
+	{
+		ap_rputs("query error", r);
+		namy_detach_pool_connection(r, mysql);
+		return OK;
+	}
 	/*
 	if (getpid()%2)
 	{

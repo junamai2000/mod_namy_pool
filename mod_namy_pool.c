@@ -52,6 +52,37 @@
 
 extern module AP_MODULE_DECLARE_DATA namy_pool_module;
 
+/*
+ * アラートメール送信関数
+ * @param path sendmail path
+ * @param from mail from
+ * @param to mail to
+ * @param subject mail subject
+ * @param msg body
+ */
+static void sendmail(const char* path, const char* from, const char* to, const char* subject, const char* body)
+{
+  FILE *fp;
+  char buf[255]={0};
+  snprintf(buf, sizeof(buf), "%s -t %s", path, from);
+  fp = popen(buf, "w");
+  if (fp == NULL) {
+    perror("Error getting hostname");
+    return;
+  }   
+  snprintf(buf, sizeof(buf), "To: %s \r\n", to);
+  fputs(buf, fp);
+
+  snprintf(buf, sizeof(buf), "From: %s \r\n", from);
+  fputs(buf, fp);
+
+  sprintf(buf, "Subject: %s\r\n\r\n", subject);
+  fputs(buf, fp);
+
+  fputs(body, fp);
+  pclose(fp);
+}
+
 /**
  * セマフォロック 
  * @param semid semaphore id 
@@ -126,10 +157,9 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   //
   // candidate lbstatus -= total factor
   namy_connection_cfg* con;
-  
+  int index, candidate=0, total=0;
   if (dir->servers > 1)
   {
-    int index, candidate=0, total=0;
     for (index=0; index<dir->servers; index++)
     {
       dir->bl->weight_status[index] += dir->bl->weight[index];
@@ -193,13 +223,63 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   gettimeofday(&t, NULL);
   con->table[i].info->start = (double)t.tv_sec + (double)t.tv_usec * 1e-6;;
 
-  // pingのコストが大きいならタイマーとか最終使用日時とかで回数を減らす
-  //if (mysql_ping(tmp->mysql) != 0)
-  //{
-  //  TRACE("[mod_namy_pool] %s: connection ping failed, id:%d", connection_pool_name, tmp->id);
-  //}
+  if (dir->servers == 1)
+    return con->table[i].mysql;
 
-  return con->table[i].mysql;	
+  // 複数コネクションがある場合は、コネクションの生存確認
+  // 死んでる場合は、weightテーブルを書き換える
+  long now;
+  now = time(NULL);
+  if (con->stat->last_check_time + entry->interval < now)
+  {
+    if (mysql_ping(con->table[i].mysql) != 0)
+    {
+      dir->bl->failure_count++;
+      if (dir->bl->failure_count > entry->allow_max_failure)
+      {
+        // fallback to next priority
+        // weightを0にしてLBから外す
+        dir->bl->weight_status[candidate] = 0;
+        dir->bl->weight[candidate] = 0;
+        dir->bl->priority[candidate] = -1;
+
+        // priority をチェックしてweightを作る
+        int j, max_priority = INT_MAX;
+        namy_connection_cfg *tmp;
+        // 一番高い優先度を探す
+        for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
+        {
+          // the smaller wins
+          if (dir->bl->priority[j] != -1 && dir->bl->priority[j] < max_priority)
+          {
+            max_priority = dir->bl->priority[j];
+          }
+        }
+        for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
+        {
+          if (max_priority == dir->bl->priority[j])
+            dir->bl->weight[j] = con->weight;
+          else
+            dir->bl->weight[j] = 0;
+        }
+        
+        TRACE("[mod_namy_pool]: %s:%s conection failed fallback to next priority", con->server, con->db);
+
+        if (entry->mail_to)
+          sendmail(entry->sendmail, entry->mail_from, entry->mail_to, "connection failed", "connection failed");
+
+      }
+      //　コネクションアンロック
+      if(con->unlock(con->sem, con->table[i].id) != 0)
+      {
+        TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", con->sem, con->table[i].id);
+      }
+      return NULL;
+    }
+    dir->bl->failure_count = 0;
+  }
+  con->stat->last_check_time = time(NULL);
+  return con->table[i].mysql;
 }
 
 /**
@@ -299,21 +379,23 @@ void namy_close_pool_connection(server_rec *s)
   {
     apr_hash_this(hi, (void*)&key, NULL, (void *)&val);
     char *con_name = (char*)key;
+    
     // confで設定したコネクション情報取得
     namy_dir_cfg* dir = (namy_dir_cfg*)val;
+
     if (shmctl(dir->shm, 0, IPC_RMID) != 0)
     {
       TRACES("[mod_namy_pool] %s: dir->shm clean up error", con_name);
+    }
+    if (shmdt(dir->next->table[0].info) != 0)
+    {
+      TRACES("[mod_namy_pool] %s: dir->shm detach error", con_name);
     }
 
     namy_connection_cfg* con;
     for (con=dir->next; con!=NULL; con=con->next)
     {
       // コネクションクローズ 
-      //if (shmdt(svr->table[0].info) != 0)
-      //{
-      //  TRACES("[mod_namy_pool] %s: dir->shm detach error", con_name);
-      //}
       //if (shmdt(svr->sem) != 0)
       //{
       //  TRACES("[mod_namy_pool] %s: svr->sem detach error", con_name);
@@ -326,8 +408,8 @@ void namy_close_pool_connection(server_rec *s)
       int i;
       for (i = 0; i < con->connections; i++)
       {
-        TRACES("[mod_namy_pool] %s: connection is closed, id:%d scramble:%s",
-            con_name, con->table[i].id, con->table[i].mysql->scramble);
+        //TRACES("[mod_namy_pool] %s: connection is closed, id:%d scramble:%s",
+        //    con_name, con->table[i].id, con->table[i].mysql->scramble);
         mysql_close(con->table[i].mysql);
       }
       TRACES("[mod_namy_pool] %s: connection is closed, server:%s",
@@ -397,6 +479,11 @@ static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
 {
   namy_svr_cfg* svr = apr_pcalloc(pool, sizeof(namy_svr_cfg));
   svr->table = apr_hash_make(pool);
+  svr->interval = 300; // デフォルトは5分
+  svr->allow_max_failure = 100;
+  svr->sendmail = "/usr/sbin/sendmail";
+  svr->mail_from = "root";
+  svr->mail_to = NULL;
   return svr;
 }
 
@@ -421,7 +508,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     // info構造体 共有スペース確保
     // 使われた回数と利用中フラグを格納
     size_t total = 
-      (sizeof(int)*dir->servers * 3) +
+      (sizeof(int)*dir->servers * 4) + // 4つのテーブル
       (sizeof(namy_cinfo)*dir->connections) +
       (sizeof(namy_stat)*dir->connections) + 
       (sizeof(balancer)*dir->servers);
@@ -485,11 +572,10 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
         my_bool my_true = TRUE;
         mysql_options(mysql, MYSQL_OPT_RECONNECT, &my_true);
 
-        mysql_real_connect(mysql,
+        if (!mysql_real_connect(mysql,
             con->server, con->user,
             con->pw, con->db, con->port,
-            con->socket, con->option);
-        if (mysql == NULL)
+            con->socket, con->option))
         {
           TRACES("[mod_namy_pool] %s: connection to %s failed", con_name, con->server);
           return !OK;
@@ -504,6 +590,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       con->stat = (namy_stat*)(shm_addr + offset);
       offset += sizeof(namy_stat);
       con->stat->conflicted = 0;
+      con->stat->last_check_time = time(NULL);
       // 関数登録
       con->lock = (void *)&namy_sem_lock;
       con->unlock = (void *)&namy_sem_unlock;
@@ -533,11 +620,27 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     dir->bl->priority = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
     //DEBUGF("p3: %p\n", shm_addr + offset);
-    int i = 0;
-    for (con=dir->next; con!=NULL; con=con->next, i++)
+    dir->bl->active_status = (int *)(shm_addr + offset);
+    offset += sizeof(int)*dir->servers;
+
+    // priority をチェックしてweightを作る
+    int i, max_priority = INT_MAX;
+    // 一番高い優先度を探す
+    for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
     {
-      dir->bl->weight[i] = con->weight;
+      // the smaller wins
+      if (con->priority < max_priority)
+      {
+        max_priority = con->priority;
+      }
       dir->bl->priority[i] = con->priority;
+    }
+    for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
+    {
+      if (max_priority == dir->bl->priority[i])
+        dir->bl->weight[i] = con->weight;
+      else
+        dir->bl->weight[i] = 0;
     }
   }
 
@@ -687,9 +790,13 @@ static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
     return "<NamyPool> block must specify a pool name";
   }
 
-  namy_dir_cfg* dir = (namy_dir_cfg*)ap_set_config_vectors(cmd->server, new_dir_conf, cmd->path, &namy_pool_module, cmd->pool);
-  
+  // pool name should be unique
   namy_svr_cfg* entry = ap_get_module_config(cmd->server->module_config, &namy_pool_module);
+  namy_dir_cfg *dir = (namy_dir_cfg*)apr_hash_get(entry->table, arg, APR_HASH_KEY_STRING);
+  if (dir != NULL)
+    return "found the same connection pool name, you can just use one time";
+
+  dir = (namy_dir_cfg*)ap_set_config_vectors(cmd->server, new_dir_conf, cmd->path, &namy_pool_module, cmd->pool);
   apr_hash_set(entry->table, arg, APR_HASH_KEY_STRING, (namy_dir_cfg*)dir);
   
   // ディレクトリの中に
@@ -698,10 +805,40 @@ static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
   if (errmsg != NULL)
     return errmsg;
 
+  if (dir->next == NULL)
+    return "no PoolServer is provided, specify at least one server";
+
   // 戻ってくる
   cmd->path = old_path;
   cmd->override = old_overrides;
 
+  return NULL;
+}
+
+// command list
+typedef enum { cmd_ping_interval, cmd_max_failure, cmd_send_mail, cmd_mail_to, cmd_mail_from } cmd_parts;
+static const char *set_option(cmd_parms *cmd, void *dbconf, const char* val)
+{
+  namy_svr_cfg* entry = ap_get_module_config(cmd->server->module_config, &namy_pool_module);
+  switch ((long) cmd->info) {
+    case cmd_ping_interval:
+      ISINT(val);
+      entry->interval = atoi(val);
+      break;
+    case cmd_max_failure:
+      ISINT(val);
+      entry->allow_max_failure = atoi(val);
+      break;
+    case cmd_send_mail:
+      entry->sendmail = val;
+      break;
+    case cmd_mail_from:
+      entry->mail_from = val;
+      break;
+    case cmd_mail_to:
+      entry->mail_to = val;
+      break;
+  }
   return NULL;
 }
 
@@ -711,6 +848,8 @@ static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
 static const char *add_server(cmd_parms *cmd, void *dummy, const char *db_string)
 {
   namy_connection_cfg* con = apr_pcalloc(cmd->pool, sizeof(namy_connection_cfg));
+  con->connections = 1; 
+  con->weight = 1;
 
   // db string 解析
   char *setting, *last1, *last2;
@@ -756,16 +895,25 @@ static const char *add_server(cmd_parms *cmd, void *dummy, const char *db_string
     else if (!strcasecmp(name,"connestion"))
     {
       ISINT(value);
+      int connection = atoi(value);
+      if (connection<1)
+        return "connection should be greater than 0";
       con->connections = atoi(value);
     }
     else if (!strcasecmp(name,"weight"))
     {
       ISINT(value);
-      con->weight = atoi(value);
+      int weight = atoi(value);
+      if (weight<0)
+        return "weight should be positive";
+      con->weight = weight;
     }
     else if (!strcasecmp(name,"priority"))
     {
       ISINT(value);
+      int priority = atoi(value);
+      if (priority<0)
+        return "priority should be positive";
       con->priority = atoi(value);
     }
     else
@@ -825,6 +973,21 @@ static const command_rec namy_pool_cmds[] = {
   // プールセクション内の設定
   AP_INIT_ITERATE("PoolServer", add_server, NULL, RSRC_CONF,
       "A server connection setting"),
+  // mysql_pintインターバール
+  AP_INIT_TAKE1("NamyPoolPingInterval", set_option, (void*)cmd_ping_interval, RSRC_CONF,
+      "default mysql_ping interval in second: default 300 sec"),
+  // mysql_ping失敗の許可回数 
+  AP_INIT_TAKE1("NamyPoolMaxFailure", set_option, (void*)cmd_max_failure, RSRC_CONF,
+      "the max number of ping failure before fallback: default 100 times"),
+  // エラーメールのfrom
+  AP_INIT_TAKE1("NamyPoolMailFrom", set_option, (void*)cmd_mail_from, RSRC_CONF,
+      "error mail from"),
+  // エラーメールのto
+  AP_INIT_TAKE1("NamyPoolMailTo", set_option, (void*)cmd_mail_to, RSRC_CONF,
+      "error mail to"),
+  // メールプログラムのパス
+  AP_INIT_TAKE1("NamyPoolSendMail", set_option, (void*)cmd_send_mail, RSRC_CONF,
+      "sendmail path: default /usr/sbin/sendmail"),
   {NULL}
 };
 

@@ -22,6 +22,7 @@ typedef struct {
 // 統計情報
 typedef struct {
   unsigned long  conflicted; // ロック待ち発生回数
+  long last_check_time;
 } namy_stat;
 
 // コネクション保存構造体
@@ -57,10 +58,14 @@ typedef struct _namy_connection_cfg {
 
 // バランシングテーブル
 typedef struct {
+  int failure_count;
   int total_weight;
   int total_priority;
   int *weight; // 重みテーブル
   int *weight_status;
+  // 利用するべきコネクション 1 - 利用 0 - 待機
+  // コネクションが切れたら、0にして、次のプライオリティーを1にする
+  int *active_status;
   int *priority; // 優先度テーブル 冗長構成用
 } balancer;
 
@@ -77,6 +82,11 @@ typedef struct {
 // 全体の設定
 typedef struct {
   apr_hash_t *table; // key->connection でnamy_svr_cfgを保存
+  int interval; // コネクションチェックのインターバル
+  int allow_max_failure;
+  char *mail_from;
+  char *mail_to;
+  char *sendmail;
 } namy_svr_cfg;
 
 // ユーティリティー
