@@ -31,8 +31,8 @@ NamyPoolPingInterval 1
 # how many times you allow mysql_ping() before fallback the connection to the next priory
 NamyPoolMaxFailure 5
 # alert mail settings
-NamyPoolMailFrom "namai@authense.co.jp"
-NamyPoolMailTo "namai@authense.co.jp"
+NamyPoolMailFrom "test@junamai2000.co.jp"
+NamyPoolMailTo "test@junamai2000.co.jp"
 NamyPoolSendMail "/usr/sbin/sendmail"
 
 # show information 
