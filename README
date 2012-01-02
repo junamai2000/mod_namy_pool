@@ -14,7 +14,7 @@ LoadModule namy_pool_module modules/mod_namy_pool.so
 # option: option value for mysql_real_connect()
 # connections: number of conecction to the server
 # weight: weight value for load balancing
-# priority: priority for fallback [experimental]
+# priority: priority for fallback function
 <NamyPool test>
   PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5;weight=10"
   PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=2;weight=10"

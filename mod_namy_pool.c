@@ -33,8 +33,8 @@
 
 #include "mod_namy_pool.h"
 
-//FILE *fp;
-//#define DEBUGF(...) fp=fopen("/tmp/log", "a+"); fprintf(fp,__VA_ARGS__); fclose(fp);
+FILE *fp;
+#define DEBUGF(...) fp=fopen("/tmp/log", "a+"); fprintf(fp,__VA_ARGS__); fclose(fp);
 
 // 面倒なやつはdefine
 #define TRACE(...) ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r->server, __VA_ARGS__)
@@ -125,6 +125,44 @@ static int namy_sem_is_locked(int semid, int semnum)
 }
 
 /**
+ * ロードバランス
+ * @param dir namy_dir_cfg
+ * @param con コネクション
+ * @return int cacndidate index
+ */
+static namy_connection_cfg* namy_load_balance(namy_dir_cfg* dir, int *selected)
+{
+  //http://httpd.apache.org/docs/2.1/ja/mod/mod_proxy_balancer.html
+  // for each worker in workers
+  //     worker lbstatus += worker lbfactor
+  //     total factor    += worker lbfactor
+  //     if worker lbstatus > candidate lbstatus
+  //     candidate = worker
+  //
+  // candidate lbstatus -= total factor
+  int index=0, candidate=0, total=0;
+  if (dir->servers > 1)
+  {
+    for (index=0; index<dir->servers; index++)
+    {
+      dir->bl->weight_status[index] += dir->bl->weight[index];
+      total += dir->bl->weight[index];
+      if (index==0 || dir->bl->weight_status[index] > dir->bl->weight_status[candidate])
+        candidate = index;
+    }
+    dir->bl->weight_status[candidate] -= total;
+    *selected = candidate;
+    return dir->pool[candidate];
+  }
+  // １サーバーの場合はロードバランシングを走らせない
+  else
+  {
+    *selected = 0;
+    return dir->next;
+  }
+}
+
+/**
  * コネクション取得
  * @param r request_rec
  * @param connection_pool_name confで指定したコネクションプール名
@@ -147,44 +185,9 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   {
     return NULL;
   }
-
-  //http://httpd.apache.org/docs/2.1/ja/mod/mod_proxy_balancer.html
-  // for each worker in workers
-  //     worker lbstatus += worker lbfactor
-  //     total factor    += worker lbfactor
-  //     if worker lbstatus > candidate lbstatus
-  //     candidate = worker
-  //
-  // candidate lbstatus -= total factor
-  namy_connection_cfg* con;
-  int index, candidate=0, total=0;
-  if (dir->servers > 1)
-  {
-    for (index=0; index<dir->servers; index++)
-    {
-      dir->bl->weight_status[index] += dir->bl->weight[index];
-      total += dir->bl->weight[index];
-      if (index==0 || dir->bl->weight_status[index] > dir->bl->weight_status[candidate])
-        candidate = index;
-    }
-    dir->bl->weight_status[candidate] -= total;
-
-    //DEBUGF("candidate: %d\n", candidate);
-    index = 0;
-    for (con=dir->next; con!=NULL; con=con->next)
-    {
-      if (index == candidate)
-        break;
-      index++;
-      //DEBUGF("loop index: %d\n", index);
-    }
-    //DEBUGF("index: %d\n", index);
-  }
-  // １サーバーの場合はロードバランシングを走らせない
-  else
-  {
-    con=dir->next;
-  }
+  
+  int candidate;
+  namy_connection_cfg* con = namy_load_balance(dir, &candidate);
   
   int i = getpid()%con->connections;
   // 使用中なので記録
@@ -234,9 +237,27 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
   {
     if (mysql_ping(con->table[i].mysql) != 0)
     {
-      dir->bl->failure_count++;
-      if (dir->bl->failure_count > entry->allow_max_failure)
+      dir->bl->failure_count[candidate]++;
+      if (dir->bl->failure_count[candidate] > entry->allow_max_failure)
       {
+        int j, available=0;
+        for (j=0; j<dir->servers; j++)
+        {
+          if (dir->bl->priority[j] != -1)
+            available++;
+        }
+
+        if (available==1)
+        {
+          TRACE("[mod_namy_pool]: %s: no server to fallbak", dir->name);
+          //　コネクションアンロック
+          if(con->unlock(con->sem, con->table[i].id) != 0)
+          {
+            TRACE("[mod_namy_pool]: conection unlock failed, sem:%d, id:%d", con->sem, con->table[i].id);
+          }
+          return NULL;
+        }
+
         // fallback to next priority
         // weightを0にしてLBから外す
         dir->bl->weight_status[candidate] = 0;
@@ -244,7 +265,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
         dir->bl->priority[candidate] = -1;
 
         // priority をチェックしてweightを作る
-        int j, max_priority = INT_MAX;
+        int max_priority = INT_MAX;
         namy_connection_cfg *tmp;
         // 一番高い優先度を探す
         for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
@@ -255,6 +276,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
             max_priority = dir->bl->priority[j];
           }
         }
+        // 重みを再計算
         for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
         {
           if (max_priority == dir->bl->priority[j])
@@ -276,7 +298,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
       }
       return NULL;
     }
-    dir->bl->failure_count = 0;
+    dir->bl->failure_count[candidate] = 0;
   }
   con->stat->last_check_time = time(NULL);
   return con->table[i].mysql;
@@ -508,7 +530,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     // info構造体 共有スペース確保
     // 使われた回数と利用中フラグを格納
     size_t total = 
-      (sizeof(int)*dir->servers * 4) + // 4つのテーブル
+      (sizeof(int)*dir->servers * 5) +
       (sizeof(namy_cinfo)*dir->connections) +
       (sizeof(namy_stat)*dir->connections) + 
       (sizeof(balancer)*dir->servers);
@@ -520,13 +542,16 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       return !OK;
     }
     dir->shm = segment;
+    dir->pool = (namy_connection_cfg**)apr_pcalloc(pconf, sizeof(namy_connection_cfg*)*dir->servers);
 
     void *shm_addr = shmat(segment, NULL, 0);
     int offset = 0;
 
+    int index;
     // confで設定したコネクション情報取得
-    for (con=dir->next; con!=NULL; con=con->next)
+    for (index=0, con=dir->next; con!=NULL; con=con->next, index++)
     {
+      dir->pool[index] = con;
       // セマフォ コネクション用排他処理
       // 統計情報用も含めて+1
       segment = semget(IPC_PRIVATE, con->connections + 1, S_IRUSR|S_IWUSR);
@@ -538,7 +563,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       con->sem = segment;
 
       // svr->table
-      con->table = (namy_connection*)apr_palloc(pconf, sizeof(namy_connection)*con->connections);
+      con->table = (namy_connection*)apr_pcalloc(pconf, sizeof(namy_connection)*con->connections);
 
       int i;
       for (i = 0; i < con->connections; i++)
@@ -622,6 +647,9 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     //DEBUGF("p3: %p\n", shm_addr + offset);
     dir->bl->active_status = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
+    //DEBUGF("p3: %p\n", shm_addr + offset);
+    dir->bl->failure_count = (int *)(shm_addr + offset);
+    offset += sizeof(int)*dir->servers;
 
     // priority をチェックしてweightを作る
     int i, max_priority = INT_MAX;
@@ -696,6 +724,12 @@ static int namy_pool_info_handler(request_rec *r)
     for (index=0; index<dir->servers; index++)
     {
       ap_rprintf(r, "<td>%d</td>", dir->bl->weight_status[index]);
+    }
+    ap_rputs("</tr>", r);
+    ap_rputs("<tr>", r);
+    for (index=0; index<dir->servers; index++)
+    {
+      ap_rprintf(r, "<td>failed %d times</td>", dir->bl->failure_count[index]);
     }
     ap_rputs("</tr>", r);
     ap_rputs("</table></td></tr>", r);
@@ -798,6 +832,7 @@ static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
 
   dir = (namy_dir_cfg*)ap_set_config_vectors(cmd->server, new_dir_conf, cmd->path, &namy_pool_module, cmd->pool);
   apr_hash_set(entry->table, arg, APR_HASH_KEY_STRING, (namy_dir_cfg*)dir);
+  dir->name = arg;
   
   // ディレクトリの中に
   cmd->path = (char*)arg;

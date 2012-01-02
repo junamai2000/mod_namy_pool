@@ -58,11 +58,11 @@ typedef struct _namy_connection_cfg {
 
 // バランシングテーブル
 typedef struct {
-  int failure_count;
   int total_weight;
   int total_priority;
   int *weight; // 重みテーブル
   int *weight_status;
+  int *failure_count;
   // 利用するべきコネクション 1 - 利用 0 - 待機
   // コネクションが切れたら、0にして、次のプライオリティーを1にする
   int *active_status;
@@ -71,12 +71,13 @@ typedef struct {
 
 // プール毎の設定
 typedef struct {
-  char *name;
+  const char *name;
   int servers;  // プールに何台サーバーがあるか
   int connections; // プール全体のコネクション数
   int shm;
   balancer *bl;
-  namy_connection_cfg *next;
+  namy_connection_cfg *next; // リンクリスト
+  namy_connection_cfg **pool; // 配列
 } namy_dir_cfg;
 
 // 全体の設定
@@ -84,9 +85,9 @@ typedef struct {
   apr_hash_t *table; // key->connection でnamy_svr_cfgを保存
   int interval; // コネクションチェックのインターバル
   int allow_max_failure;
-  char *mail_from;
-  char *mail_to;
-  char *sendmail;
+  const char *mail_from;
+  const char *mail_to;
+  const char *sendmail;
 } namy_svr_cfg;
 
 // ユーティリティー
