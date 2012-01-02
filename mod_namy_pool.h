@@ -63,9 +63,6 @@ typedef struct {
   int *weight; // 重みテーブル
   int *weight_status;
   int *failure_count;
-  // 利用するべきコネクション 1 - 利用 0 - 待機
-  // コネクションが切れたら、0にして、次のプライオリティーを1にする
-  int *active_status;
   int *priority; // 優先度テーブル 冗長構成用
 } balancer;
 

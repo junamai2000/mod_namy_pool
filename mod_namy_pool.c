@@ -17,13 +17,14 @@
 #include <sys/sem.h>
 #include <mysql.h>
 
+#include "http_core.h"
 #include "http_protocol.h"
 #include "http_config.h"
 #include "http_log.h"
 #include "http_request.h"
 
-#define APR_WANT_MEMFUNC
-#define APR_WANT_STRFUNC
+//#define APR_WANT_MEMFUNC
+//#define APR_WANT_STRFUNC
 #include "apr_reslist.h"
 #include "apr_strings.h"
 #include "apr_hash.h"
@@ -33,8 +34,8 @@
 
 #include "mod_namy_pool.h"
 
-FILE *fp;
-#define DEBUGF(...) fp=fopen("/tmp/log", "a+"); fprintf(fp,__VA_ARGS__); fclose(fp);
+//FILE *fp;
+//#define DEBUGF(...) fp=fopen("/tmp/log", "a+"); fprintf(fp,__VA_ARGS__); fclose(fp);
 
 // 面倒なやつはdefine
 #define TRACE(...) ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r->server, __VA_ARGS__)
@@ -67,7 +68,7 @@ static void sendmail(const char* path, const char* from, const char* to, const c
   snprintf(buf, sizeof(buf), "%s -t %s", path, from);
   fp = popen(buf, "w");
   if (fp == NULL) {
-    perror("Error getting hostname");
+    perror("Error to open mail program");
     return;
   }   
   snprintf(buf, sizeof(buf), "To: %s \r\n", to);
@@ -484,9 +485,9 @@ int namy_is_pooled_connection(request_rec *r, MYSQL *mysql)
   return NAMY_UNKNOWN_CONNECTION;
 }
 
-//
-// メモリ解放、コネクション解放関数
-//
+/**
+ * メモリ解放、コネクション解放関数
+ */
 static apr_status_t namy_pool_destroy(void *data)
 {
   server_rec *s = data;
@@ -494,9 +495,9 @@ static apr_status_t namy_pool_destroy(void *data)
   return APR_SUCCESS;
 }
 
-//
-// 設定ファイル構造体 メモリ確保
-//
+/**
+ * 設定ファイル構造体 メモリ確保
+ */
 static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
 {
   namy_svr_cfg* svr = apr_pcalloc(pool, sizeof(namy_svr_cfg));
@@ -509,9 +510,9 @@ static void *create_namy_pool_config(apr_pool_t *pool, server_rec *s)
   return svr;
 }
 
-//
-// 設定ファイルで作られた情報から、コネクションを作る
-//
+/**
+ * 設定ファイルで作られた情報から、コネクションを作る
+ */
 static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     apr_pool_t *ptemp, server_rec *s)
 {
@@ -530,7 +531,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     // info構造体 共有スペース確保
     // 使われた回数と利用中フラグを格納
     size_t total = 
-      (sizeof(int)*dir->servers * 5) +
+      (sizeof(int)*dir->servers * 4) +
       (sizeof(namy_cinfo)*dir->connections) +
       (sizeof(namy_stat)*dir->connections) + 
       (sizeof(balancer)*dir->servers);
@@ -645,9 +646,6 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     dir->bl->priority = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
     //DEBUGF("p3: %p\n", shm_addr + offset);
-    dir->bl->active_status = (int *)(shm_addr + offset);
-    offset += sizeof(int)*dir->servers;
-    //DEBUGF("p3: %p\n", shm_addr + offset);
     dir->bl->failure_count = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
 
@@ -679,9 +677,9 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
   return OK;
 }
 
-//
-// 統計情報を表示
-//
+/**
+ * コネクションの情報表示
+ */
 static int namy_pool_info_handler(request_rec *r)
 {
   if (strcmp(r->handler, "namy_pool")) {
@@ -689,10 +687,9 @@ static int namy_pool_info_handler(request_rec *r)
   }   
   r->content_type = "text/html";    
 
-  ap_rputs("<html><body>\n", r); 
-
-  ap_rputs(namy_pool_module.name, r); 
-  ap_rputs("<br />\n", r); 
+  ap_rputs("<html><head><title>Mod_namy_pool cuurent status</title></head><body>\n", r); 
+  ap_rputs("<h2>Mod_namy_pool Cuurent Status for ", r); 
+  ap_rvputs(r, ap_get_server_name(r), "</h2>\n\n", NULL);
 
   namy_svr_cfg* entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
   apr_hash_index_t *hi;
@@ -706,99 +703,123 @@ static int namy_pool_info_handler(request_rec *r)
     namy_dir_cfg* dir = (namy_dir_cfg*)val;
     namy_connection_cfg* con= NULL;
 
-    ap_rputs("<table border=\"1\"><tr><td>", r);
+    ap_rputs("<table border=\"4\" cellspacing=\"0\" cellpadding=\"2\"><tr><td>\n", r);
+
     // プール毎の情報
-    ap_rprintf(r, "<tr><td><b>Connection Pool Name: <b>%s</td></tr>", con_name);
-    ap_rprintf(r, "<tr><td><b>Servers: </b>%d</td></tr>", dir->servers);
+    ap_rprintf(r, "<tr><td bgcolor=\"#000000\"><font color=\"#FFFFFF\">"
+        "<b>Connection Pool Name: </b>%s (with %d servers)</font></td></tr>\n",
+        con_name,
+        dir->servers
+    );
   
     // バランサーテーブル
-    ap_rputs("<tr><td><table border=\"1\">", r);
+    ap_rputs("<tr><td><table border=\"1\" cellspacing=\"0\" cellpadding=\"2\" align=\"center\">\n", r);
     int index;
-    ap_rputs("<tr>", r);
+    // TD 
+    ap_rputs("<tr><th></th>\n", r);
     for (index=0; index<dir->servers; index++)
     {
-      ap_rprintf(r, "<td>id:%d, weight:%d</td>", index, dir->bl->weight[index]);
+      ap_rprintf(r, "<th bgcolor=\"#cccccc\">Connection No:%d</th>", index);
     }
-    ap_rputs("</tr>", r);
-    ap_rputs("<tr>", r);
+    ap_rputs("</tr>\n", r);
+    ap_rputs("<tr align=\"center\"><th bgcolor=\"#cccccc\">Priority (-1 means fallback)</th>", r);
+    for (index=0; index<dir->servers; index++)
+    {
+      ap_rprintf(r, "<td>%d</td>", dir->bl->priority[index]);
+    }
+    ap_rputs("</tr>\n", r);
+    ap_rputs("<tr align=\"center\"><th bgcolor=\"#cccccc\">Weight</th>", r);
+    for (index=0; index<dir->servers; index++)
+    {
+      ap_rprintf(r, "<td>%d</td>", dir->bl->weight[index]);
+    }
+    ap_rputs("</tr>\n", r);
+    ap_rputs("<tr align=\"center\"><th bgcolor=\"#cccccc\">Weight Status</th>", r);
     for (index=0; index<dir->servers; index++)
     {
       ap_rprintf(r, "<td>%d</td>", dir->bl->weight_status[index]);
     }
-    ap_rputs("</tr>", r);
-    ap_rputs("<tr>", r);
+    ap_rputs("</tr>\n", r);
+    ap_rputs("<tr align=\"center\"><th bgcolor=\"#cccccc\">Number of mysql_ping() Failed</th>", r);
     for (index=0; index<dir->servers; index++)
     {
-      ap_rprintf(r, "<td>failed %d times</td>", dir->bl->failure_count[index]);
+      ap_rprintf(r, "<td>%d</td>", dir->bl->failure_count[index]);
     }
-    ap_rputs("</tr>", r);
-    ap_rputs("</table></td></tr>", r);
+    ap_rputs("</tr>\n", r);
+    ap_rputs("</table></td></tr>\n", r);
 
-    for (con=dir->next; con!=NULL; con=con->next)
+    // pool内のコネクション情報
+    for (index=0, con=dir->next; con!=NULL; con=con->next, index++)
     {
-      ap_rputs("<tr><td><table border=\"1\">", r);
-      ap_rprintf(r, "<tr><td colspan=\"4\"><b>Server Name: </b>%s</td><td colspan=\"4\"><b>port: </b>%d</td></tr>", con->server, con->port);
-      ap_rprintf(r, "<tr><td colspan=\"4\"><b>User: </b>%s</td><td colspan=\"4\"><b>Database: </b>%s</td></tr>", con->user, con->db);
-      ap_rprintf(r, "<tr><td colspan=\"4\"><b>SHM: </b>%d</td><td colspan=\"4\"><b>SEM: </b>%d</td></tr>", dir->shm, con->sem);
-      ap_rprintf(r, "<tr><td colspan=\"4\"><b>Weight: </b>%d</td><td colspan=\"4\"><b>Priority: </b>%d</td></tr>", con->weight, con->priority);
-      ap_rprintf(r, "<tr><td colspan=\"4\"><b>Conflict: </b>%ld</td><td colspan=\"4\"><b>Connections:</b> %d</td></tr>", con->stat->conflicted, con->connections);
+      ap_rputs("<tr><td><table border=\"1\" cellspacing=\"0\" cellpadding=\"2\">", r);
+      ap_rprintf(r, "<tr bgcolor=\"#cccccc\"><td colspan=\"7\"><b>Connection No: %d:</b> %s@%s:%d | dbname=%s | weight=%d | priority=%d | connections=%d</td></tr>\n",
+          index,
+          con->user,
+          con->server,
+          con->port,
+          con->db,
+          con->weight,
+          con->priority,
+          con->connections
+      );
+      ap_rprintf(r, "<tr><td colspan=\"7\"><b>Shm:</b> %d | <b>Semaphore:</b> %d | <b>Conflict Count</b> %ld </td></tr>\n",
+          dir->shm,
+          con->sem,
+          con->stat->conflicted
+      );
 
       // コネクション毎の情報
       ap_rputs(
-          "<td>connection id</td>"
-          "<td>thread id in mysqld</td>"
-          "<td>mysql scrable string</td>"
-          "<td>count</td>"
-          "<td>current user</td>"
-          "<td>avg</td>"
-          "<td>max</td>"
-          "<td>sem locked</td>"
+          "<th>Table Index</th>"
+          "<th>Thread Id in mysqld</th>"
+          "<th>Used Count</th>"
+          "<th>User Pid</th>"
+          "<th>Avg</th>"
+          "<th>Max</th>"
+          "<th>Lock Flag</th>"
           "</tr>\n", r); 
 
+      // 各コネクション
       int i;
       for (i = 0; i < con->connections; i++)
       {
         ap_rprintf(r, 
             "<tr><td>%d</td>"
             "<td>%ld</td>"
-            "<td>%s</td>"
             "<td>%ld</td>"
             "<td>%d</td>"
-            "<td>%10.20f</td>"
-            "<td>%10.20f</td>"
-            "<td>%d</td></tr>\n",
+            "<td>%10.10f</td>"
+            "<td>%10.10f</td>"
+            "<td>%s</td></tr>\n",
             con->table[i].id,
             con->table[i].mysql->thread_id,
-            ap_escape_html(r->pool, con->table[i].mysql->scramble),
             con->table[i].info->count,
             con->table[i].info->pid,
             con->table[i].info->avg,
             con->table[i].info->max,
-            (con->is_locked(con->sem, con->table[i].id) == 0)? 1: 0
+            (con->is_locked(con->sem, con->table[i].id) == 0)? "on":"off" 
             );
       }
-
-      ap_rputs("</table></td></tr>", r);
+      ap_rputs("</table></td></tr>\n", r);
     }
-    ap_rputs("</td></tr><table><br />", r);
+    ap_rputs("</td></tr><table><hr />\n", r);
   }
-
   ap_rputs("</body></html>\n", r); 
   return OK; 
 }
 
-//
-// フック登録
-//
+/**
+ * Hook登録
+ */
 static void namy_pool_hooks(apr_pool_t *pool)
 {
   ap_hook_post_config(namy_pool_post_config, NULL, NULL, APR_HOOK_MIDDLE);
   ap_hook_handler(namy_pool_info_handler, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
-//
-//
-// 
+/**
+ * ディレクティブの中に入った時
+ */
 static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
 {
   const char *errmsg;
@@ -850,7 +871,9 @@ static const char *namy_section(cmd_parms *cmd, void *mconfig, const char *arg)
   return NULL;
 }
 
-// command list
+/**
+ * モジュールの動作設定
+ */
 typedef enum { cmd_ping_interval, cmd_max_failure, cmd_send_mail, cmd_mail_to, cmd_mail_from } cmd_parts;
 static const char *set_option(cmd_parms *cmd, void *dbconf, const char* val)
 {
@@ -877,9 +900,9 @@ static const char *set_option(cmd_parms *cmd, void *dbconf, const char* val)
   return NULL;
 }
 
-//
-//
-//
+/**
+ * コネクションプールにサーバーを追加する時
+ */
 static const char *add_server(cmd_parms *cmd, void *dummy, const char *db_string)
 {
   namy_connection_cfg* con = apr_pcalloc(cmd->pool, sizeof(namy_connection_cfg));
@@ -986,9 +1009,9 @@ static const char *add_server(cmd_parms *cmd, void *dummy, const char *db_string
   return NULL;
 }
 
-//
-//
-//
+/**
+ * ディレクティブ毎に作られる
+ */
 static void *create_namy_pool_dir_config(apr_pool_t *p, char *dummy)
 {
   namy_dir_cfg* new = (namy_dir_cfg*)apr_pcalloc(p, sizeof(namy_dir_cfg));
@@ -998,9 +1021,9 @@ static void *create_namy_pool_dir_config(apr_pool_t *p, char *dummy)
   return (void *) new; 
 }
 
-//
-// 設定ファイルのエントリー
-//
+/**
+ * 設定ファイルのエントリー
+ */
 static const command_rec namy_pool_cmds[] = {
   // プールセクション
   AP_INIT_RAW_ARGS("<NamyPool", namy_section, NULL, RSRC_CONF,
@@ -1026,9 +1049,9 @@ static const command_rec namy_pool_cmds[] = {
   {NULL}
 };
 
-//
-// モジュール構造隊
-//
+/**
+ * モジュール構造隊
+ */
 module AP_MODULE_DECLARE_DATA namy_pool_module = {
   STANDARD20_MODULE_STUFF,
   create_namy_pool_dir_config,
