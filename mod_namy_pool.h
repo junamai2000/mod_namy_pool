@@ -58,8 +58,6 @@ typedef struct _namy_connection_cfg {
 
 // バランシングテーブル
 typedef struct {
-  int total_weight;
-  int total_priority;
   int *weight; // 重みテーブル
   int *weight_status;
   int *failure_count;

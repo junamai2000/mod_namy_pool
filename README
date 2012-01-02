@@ -4,7 +4,6 @@
 
 # load module
 LoadModule namy_pool_module modules/mod_namy_pool.so
-
 # make pooling 
 # server: mysqld server name
 # db: database name
@@ -25,16 +24,14 @@ LoadModule namy_pool_module modules/mod_namy_pool.so
   PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=2;weight=10"
   PoolServer "server=localhost;db=test;user=root;port=3340;socket=/var/lib/mysql/mysql.sock;option=0;connestion=5;weight=10"
 </NamyPool>
-
 # mysql_ping() interval to check connections, 5 means 5 seconds
 NamyPoolPingInterval 1
-# how many times you allow mysql_ping() before fallback the connection to the next priory
+# how many times you allow mysql_ping() failures before switching fallback servers
 NamyPoolMaxFailure 5
 # alert mail settings
 NamyPoolMailFrom "test@junamai2000.co.jp"
 NamyPoolMailTo "test@junamai2000.co.jp"
 NamyPoolSendMail "/usr/sbin/sendmail"
-
 # show information 
 <Location /connections>
   SetHandler namy_pool

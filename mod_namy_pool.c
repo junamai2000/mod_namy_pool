@@ -36,7 +36,6 @@
 
 //FILE *fp;
 //#define DEBUGF(...) fp=fopen("/tmp/log", "a+"); fprintf(fp,__VA_ARGS__); fclose(fp);
-
 // 面倒なやつはdefine
 #define TRACE(...) ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, r->server, __VA_ARGS__)
 #define TRACES(...) ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_NOTICE, 0, s, __VA_ARGS__)
@@ -124,6 +123,72 @@ static int namy_sem_is_locked(int semid, int semnum)
 {
   return semctl(semid, semnum, GETVAL);
 }
+
+/**
+ * ロードバランサーからサーバー削除
+ */
+static void namy_remove_from_balancer(namy_dir_cfg* dir, int index)
+{
+  // weightを0にしてLBから外す
+  dir->bl->weight_status[index] = 0;
+  dir->bl->weight[index] = 0;
+  dir->bl->priority[index] = -1;
+}
+
+/**
+ * 設定された優先度をバランサーに設定
+ */
+static void namy_balancer_init(namy_dir_cfg* dir)
+{
+  int i;
+  namy_connection_cfg* con = NULL;
+  for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
+  {
+    dir->bl->priority[i] = con->priority;
+  }
+}
+
+/**
+ * 有効サーバー数取得
+ */
+static int namy_get_num_of_available_servers(namy_dir_cfg* dir)
+{
+  int i, available=0;
+  for (i=0; i<dir->servers; i++)
+  {
+    if (dir->bl->priority[i] != -1)
+      available++;
+  }
+  return available;
+}
+
+/**
+ * ロードバランサーの重み計算
+ */
+static void namy_calculate_balancing_weight(namy_dir_cfg* dir)
+{
+  namy_connection_cfg* con = NULL;
+  // priority をチェックしてweightを作る
+  int i, max_priority = INT_MAX;
+  // 一番高い優先度を探す
+  for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
+  {
+    // the smaller wins
+    if (dir->bl->priority[i] != -1 && dir->bl->priority[i] < max_priority)
+    {
+      max_priority = dir->bl->priority[i];
+    }
+  }
+  // weight再計算
+  for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
+  {
+    if (max_priority == dir->bl->priority[i])
+      dir->bl->weight[i] = con->weight;
+    else
+      dir->bl->weight[i] = 0;
+  }
+}
+
 
 /**
  * ロードバランス
@@ -219,7 +284,7 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
     TRACE("[mod_namy_pool]: conection lock failed, sem:%d, id:%d", con->sem, con->table[i].id);
     return NULL;
   }
-  
+ 
   con->table[i].info->count++;
   con->table[i].info->pid = getpid();
   // 統計情報
@@ -241,16 +306,9 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
       dir->bl->failure_count[candidate]++;
       if (dir->bl->failure_count[candidate] > entry->allow_max_failure)
       {
-        int j, available=0;
-        for (j=0; j<dir->servers; j++)
+        if (namy_get_num_of_available_servers(dir) == 1)
         {
-          if (dir->bl->priority[j] != -1)
-            available++;
-        }
-
-        if (available==1)
-        {
-          TRACE("[mod_namy_pool]: %s: no server to fallbak", dir->name);
+          TRACE("[mod_namy_pool]: %s: no fallback server", dir->name);
           //　コネクションアンロック
           if(con->unlock(con->sem, con->table[i].id) != 0)
           {
@@ -258,39 +316,13 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
           }
           return NULL;
         }
-
-        // fallback to next priority
-        // weightを0にしてLBから外す
-        dir->bl->weight_status[candidate] = 0;
-        dir->bl->weight[candidate] = 0;
-        dir->bl->priority[candidate] = -1;
-
+        // switch next connection
+        namy_remove_from_balancer(dir, candidate);
         // priority をチェックしてweightを作る
-        int max_priority = INT_MAX;
-        namy_connection_cfg *tmp;
-        // 一番高い優先度を探す
-        for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
-        {
-          // the smaller wins
-          if (dir->bl->priority[j] != -1 && dir->bl->priority[j] < max_priority)
-          {
-            max_priority = dir->bl->priority[j];
-          }
-        }
-        // 重みを再計算
-        for (j=0, tmp=dir->next; tmp!=NULL; tmp=tmp->next, j++)
-        {
-          if (max_priority == dir->bl->priority[j])
-            dir->bl->weight[j] = con->weight;
-          else
-            dir->bl->weight[j] = 0;
-        }
-        
-        TRACE("[mod_namy_pool]: %s:%s conection failed fallback to next priority", con->server, con->db);
-
+        namy_calculate_balancing_weight(dir);
+        TRACE("[mod_namy_pool]: %s:%s failed to switch the next priority", con->server, con->db);
         if (entry->mail_to)
           sendmail(entry->sendmail, entry->mail_from, entry->mail_to, "connection failed", "connection failed");
-
       }
       //　コネクションアンロック
       if(con->unlock(con->sem, con->table[i].id) != 0)
@@ -534,7 +566,7 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       (sizeof(int)*dir->servers * 4) +
       (sizeof(namy_cinfo)*dir->connections) +
       (sizeof(namy_stat)*dir->connections) + 
-      (sizeof(balancer)*dir->servers);
+      (sizeof(balancer));
 
     int segment = shmget(IPC_PRIVATE, total, S_IRUSR|S_IWUSR);  
     if (segment == -1)
@@ -622,11 +654,6 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       con->unlock = (void *)&namy_sem_unlock;
       con->is_locked = (void *)&namy_sem_is_locked;
 
-      // shm　設定
-      dir->bl = (balancer*)(shm_addr + offset);
-      offset += sizeof(balancer);
-      dir->bl->total_weight += con->weight;
-      dir->bl->total_priority += con->priority;
       // 統計情報のセマフォ初期化 セマフォ番号は０から始まるから+1しない
       if (semctl(con->sem, con->connections, SETVAL, 1) != 0)
       {
@@ -635,7 +662,10 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
       }
       TRACES("[mod_namy_pool] %s: connected to %s with %d conections", con_name, con->server, con->connections);
     }
-
+    
+    // shm　設定
+    dir->bl = (balancer*)(shm_addr + offset);
+    offset += sizeof(balancer);
     // バランシングテーブル作成
     dir->bl->weight = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
@@ -649,25 +679,9 @@ static int namy_pool_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     dir->bl->failure_count = (int *)(shm_addr + offset);
     offset += sizeof(int)*dir->servers;
 
-    // priority をチェックしてweightを作る
-    int i, max_priority = INT_MAX;
-    // 一番高い優先度を探す
-    for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
-    {
-      // the smaller wins
-      if (con->priority < max_priority)
-      {
-        max_priority = con->priority;
-      }
-      dir->bl->priority[i] = con->priority;
-    }
-    for (i=0, con=dir->next; con!=NULL; con=con->next, i++)
-    {
-      if (max_priority == dir->bl->priority[i])
-        dir->bl->weight[i] = con->weight;
-      else
-        dir->bl->weight[i] = 0;
-    }
+    // priority 初期化
+    namy_balancer_init(dir);
+    namy_calculate_balancing_weight(dir);
   }
 
   // コネクション待ちする時のため	
@@ -703,7 +717,7 @@ static int namy_pool_info_handler(request_rec *r)
     namy_dir_cfg* dir = (namy_dir_cfg*)val;
     namy_connection_cfg* con= NULL;
 
-    ap_rputs("<table border=\"4\" cellspacing=\"0\" cellpadding=\"2\"><tr><td>\n", r);
+    ap_rputs("<table border=\"4\" cellspacing=\"0\" cellpadding=\"0\"><tr><td>\n", r);
 
     // プール毎の情報
     ap_rprintf(r, "<tr><td bgcolor=\"#000000\"><font color=\"#FFFFFF\">"
@@ -716,7 +730,7 @@ static int namy_pool_info_handler(request_rec *r)
     ap_rputs("<tr><td><table border=\"1\" cellspacing=\"0\" cellpadding=\"2\" align=\"center\">\n", r);
     int index;
     // TD 
-    ap_rputs("<tr><th></th>\n", r);
+    ap_rputs("<tr><th>Calculated Balancing Table</th>\n", r);
     for (index=0; index<dir->servers; index++)
     {
       ap_rprintf(r, "<th bgcolor=\"#cccccc\">Connection No:%d</th>", index);
@@ -752,7 +766,7 @@ static int namy_pool_info_handler(request_rec *r)
     for (index=0, con=dir->next; con!=NULL; con=con->next, index++)
     {
       ap_rputs("<tr><td><table border=\"1\" cellspacing=\"0\" cellpadding=\"2\">", r);
-      ap_rprintf(r, "<tr bgcolor=\"#cccccc\"><td colspan=\"7\"><b>Connection No: %d:</b> %s@%s:%d | dbname=%s | weight=%d | priority=%d | connections=%d</td></tr>\n",
+      ap_rprintf(r, "<tr bgcolor=\"#cccccc\"><td colspan=\"7\"><b>Connection No %d:</b> %s@%s:%d | dbname=%s | weight=%d | priority=%d | connections=%d</td></tr>\n",
           index,
           con->user,
           con->server,
@@ -1036,7 +1050,7 @@ static const command_rec namy_pool_cmds[] = {
       "default mysql_ping interval in second: default 300 sec"),
   // mysql_ping失敗の許可回数 
   AP_INIT_TAKE1("NamyPoolMaxFailure", set_option, (void*)cmd_max_failure, RSRC_CONF,
-      "the max number of ping failure before fallback: default 100 times"),
+      "the max number of ping failure before switching a fallback server: default 100 times"),
   // エラーメールのfrom
   AP_INIT_TAKE1("NamyPoolMailFrom", set_option, (void*)cmd_mail_from, RSRC_CONF,
       "error mail from"),
