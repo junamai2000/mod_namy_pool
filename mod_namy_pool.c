@@ -18,6 +18,8 @@
 #include <mysql.h>
 
 #include "http_core.h"
+#define CORE_PRIVATE
+
 #include "http_protocol.h"
 #include "http_config.h"
 #include "http_log.h"
@@ -189,7 +191,6 @@ static void namy_calculate_balancing_weight(namy_dir_cfg* dir)
   }
 }
 
-
 /**
  * ロードバランス
  * @param dir namy_dir_cfg
@@ -320,9 +321,23 @@ MYSQL *namy_attach_pool_connection(request_rec *r, const char* connection_pool_n
         namy_remove_from_balancer(dir, candidate);
         // priority をチェックしてweightを作る
         namy_calculate_balancing_weight(dir);
-        TRACE("[mod_namy_pool]: %s:%s failed to switch the next priority", con->server, con->db);
+        TRACE("[mod_namy_pool]: %s:%s failed to switch the pool to the next priority", con->server, con->db);
         if (entry->mail_to)
-          sendmail(entry->sendmail, entry->mail_from, entry->mail_to, "connection failed", "connection failed");
+        {
+          char msg[500]={0};
+          snprintf(msg, sizeof(msg),
+            "Connection Pool: %s\n"
+            "Server: %s@%s:%d connection faild\n"
+            "Switched to the next priory\n",
+            dir->name,
+            con->user,
+            con->server,
+            con->port
+          );
+          sendmail(entry->sendmail, entry->mail_from, entry->mail_to,
+            "[mod_namay_pool] switch the pool to the next priority",
+            msg);
+        }
       }
       //　コネクションアンロック
       if(con->unlock(con->sem, con->table[i].id) != 0)
@@ -471,7 +486,7 @@ void namy_close_pool_connection(server_rec *s)
           con_name, con->server);
     }
   }
-  apr_hash_clear(entry->table);
+  //apr_hash_clear(entry->table);
 }
 
 /**
@@ -698,14 +713,51 @@ static int namy_pool_info_handler(request_rec *r)
 {
   if (strcmp(r->handler, "namy_pool")) {
     return DECLINED;
-  }   
+  }
+  if (r->method_number != M_GET)
+    return DECLINED;
+
+  apr_table_t *params = apr_table_make(r->pool, 10);
+  if (r->args) {
+    char *args = apr_pstrdup(r->pool, r->args);
+    char *tok, *val;
+    while (args && *args) {
+      if ((val = ap_strchr(args, '='))) {
+        *val++ = '\0';
+        if ((tok = ap_strchr(val, '&')))
+          *tok++ = '\0';
+        apr_table_setn(params, args, val);
+        args = tok; 
+      }    
+      else 
+        return HTTP_BAD_REQUEST;
+    }    
+  }
+
+  namy_svr_cfg* entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
+  namy_dir_cfg* dir;
+
+  const char *val1, *val2;
+  if ((val1 = apr_table_get(params, "clear")) && (val2 = apr_table_get(params, "p"))) {
+    if (strcasecmp(val1, "1"))
+      return HTTP_BAD_REQUEST;
+
+    dir = (namy_dir_cfg*)apr_hash_get(entry->table, val2, APR_HASH_KEY_STRING);
+    if (dir == NULL)
+      return HTTP_BAD_REQUEST;
+
+    namy_balancer_init(dir);
+    namy_calculate_balancing_weight(dir);
+    apr_table_setn(r->headers_out, "Location", r->uri);
+    return HTTP_MOVED_TEMPORARILY;
+  }
+
   r->content_type = "text/html";    
 
   ap_rputs("<html><head><title>Mod_namy_pool cuurent status</title></head><body>\n", r); 
   ap_rputs("<h2>Mod_namy_pool Cuurent Status for ", r); 
   ap_rvputs(r, ap_get_server_name(r), "</h2>\n\n", NULL);
 
-  namy_svr_cfg* entry = ap_get_module_config(r->server->module_config, &namy_pool_module);
   apr_hash_index_t *hi;
   void *key, *val;
   // 各コネクションを取り出す
@@ -714,23 +766,26 @@ static int namy_pool_info_handler(request_rec *r)
     apr_hash_this(hi, (void*)&key, NULL, (void*)&val);
     // confで設定したコネクション情報取得
     char *con_name = (char*)key;
-    namy_dir_cfg* dir = (namy_dir_cfg*)val;
+    dir = (namy_dir_cfg*)val;
     namy_connection_cfg* con= NULL;
 
     ap_rputs("<table border=\"4\" cellspacing=\"0\" cellpadding=\"0\"><tr><td>\n", r);
 
     // プール毎の情報
     ap_rprintf(r, "<tr><td bgcolor=\"#000000\"><font color=\"#FFFFFF\">"
-        "<b>Connection Pool Name: </b>%s (with %d servers)</font></td></tr>\n",
+        "<b>Connection Pool Name: </b>%s (with %d servers) \n",
         con_name,
         dir->servers
     );
+    ap_rputs("</font></td></tr>\n", r);
   
     // バランサーテーブル
     ap_rputs("<tr><td><table border=\"1\" cellspacing=\"0\" cellpadding=\"2\" align=\"center\">\n", r);
     int index;
     // TD 
-    ap_rputs("<tr><th>Calculated Balancing Table</th>\n", r);
+    ap_rputs("<tr><th>Calculated Balancing Table \n", r);
+    ap_rprintf(r, "<a href=\"?p=%s&clear=1\">Clear Table</a>\n", con_name);
+    ap_rputs("</th>", r);
     for (index=0; index<dir->servers; index++)
     {
       ap_rprintf(r, "<th bgcolor=\"#cccccc\">Connection No:%d</th>", index);
@@ -760,7 +815,8 @@ static int namy_pool_info_handler(request_rec *r)
       ap_rprintf(r, "<td>%d</td>", dir->bl->failure_count[index]);
     }
     ap_rputs("</tr>\n", r);
-    ap_rputs("</table></td></tr>\n", r);
+    ap_rputs("</table>\n", r);
+    ap_rputs("</td></tr>\n", r);
 
     // pool内のコネクション情報
     for (index=0, con=dir->next; con!=NULL; con=con->next, index++)
@@ -776,7 +832,7 @@ static int namy_pool_info_handler(request_rec *r)
           con->priority,
           con->connections
       );
-      ap_rprintf(r, "<tr><td colspan=\"7\"><b>Shm:</b> %d | <b>Semaphore:</b> %d | <b>Conflict Count</b> %ld </td></tr>\n",
+      ap_rprintf(r, "<tr><td colspan=\"7\"><b>Shm:</b> %d | <b>Semaphore:</b> %d | <b>Conflict Count:</b> %ld </td></tr>\n",
           dir->shm,
           con->sem,
           con->stat->conflicted
